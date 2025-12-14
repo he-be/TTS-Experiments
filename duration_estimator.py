@@ -14,6 +14,8 @@ except ImportError:
     detect = None
 
 try:
+    import nltk
+    nltk.download("averaged_perceptron_tagger_eng", quiet=True)
     from g2p_en import G2p
 except ImportError:
     G2p = None
