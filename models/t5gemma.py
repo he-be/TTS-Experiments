@@ -1125,6 +1125,282 @@ class T5GemmaVoiceModel(nn.Module):
             generated_tensor = generated_tensor - int(self.args.n_special)
         return res, generated_tensor.unsqueeze(0)
 
+    @torch.inference_mode()
+    def inference_tts_batch(
+        self,
+        x: torch.Tensor,
+        x_lens: torch.Tensor,
+        y: torch.Tensor,
+        tgt_y_lens: torch.Tensor,
+        num_samples: int = 1,
+        top_k: Union[int, List[int]] = -100,
+        top_p: float = 1.0,
+        min_p: float = 0.0,
+        temperature: float = 1.0,
+        stop_repetition: int = 3,
+        silence_tokens: List[int] = None,
+        **kwargs,
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+        """
+        Batch inference: generate multiple samples in parallel with different random seeds.
+        All samples share the same input text and prompt, only sampling differs.
+
+        Returns:
+            all_results: List of (concat) tensors for each sample
+            all_generated: List of generated-only tensors for each sample
+        """
+        if getattr(self.args, "n_codebooks", 1) != 1:
+            raise ValueError("XCodec2 inference expects n_codebooks=1.")
+
+        self.backbone.config.use_cache = True
+        silence_tokens = silence_tokens or []
+
+        device = x.device
+        eog_inference = (
+            self.args.eos if getattr(self.args, "eos", -1) > 0 else self.args.eog
+        )
+
+        # Encoder: process once, then expand for batch
+        x_padding_mask = make_pad_mask(x_lens).to(device)
+        encoder_attention_mask = (~x_padding_mask).long()
+        if getattr(self.args, "use_pm_rope", 1):
+            encoder_position_ids = self._build_position_ids(x_lens, x.shape[1], device)
+        else:
+            encoder_position_ids = None
+
+        if self.text_input_type == "text":
+            encoder_outputs = self.encoder_module(
+                input_ids=x,
+                attention_mask=encoder_attention_mask,
+                position_ids=encoder_position_ids,
+            )
+        else:
+            x_embeds = self.text_dropout(self.text_embedding(x))
+            encoder_outputs = self.encoder_module(
+                inputs_embeds=x_embeds,
+                attention_mask=encoder_attention_mask,
+                position_ids=encoder_position_ids,
+            )
+        memory_single = encoder_outputs.last_hidden_state  # [1, seq_len, hidden]
+
+        # Expand encoder outputs for batch
+        memory = memory_single.expand(num_samples, -1, -1)  # [B, seq_len, hidden]
+        encoder_attention_mask = encoder_attention_mask.expand(num_samples, -1)
+        if encoder_position_ids is not None:
+            encoder_position_ids = encoder_position_ids.expand(num_samples, -1)
+
+        # Prepare prompt
+        if self.args.special_first:
+            y = y + int(self.args.n_special)
+        y = y.transpose(2, 1).contiguous()  # [1, 1, T]
+        y_len = y.shape[-1]
+        prompt_frames = kwargs.get("prompt_frames", y_len)
+
+        target_total = None
+        cutoff_limit = None
+        if tgt_y_lens is not None:
+            target_total = int(tgt_y_lens[0].item())
+            extra_cutoff = getattr(self.args, "extra_cutoff", 5.0)
+            codec_sr = int(getattr(self.args, "encodec_sr", 50))
+            cutoff_limit = target_total + int(codec_sr * extra_cutoff)
+
+        # Prepend BOS and expand for batch
+        bos = torch.full((1, 1, 1), self.args.empty_token, dtype=torch.long, device=device)
+        cated_y = torch.cat([bos, y], dim=2)  # [1, 1, T+1]
+        cated_y = cated_y.expand(num_samples, -1, -1)  # [B, 1, T+1]
+
+        embedded_y = self.audio_embedding[0](cated_y[:, 0])  # [B, T+1, hidden]
+        embedded_y = self.audio_dropout(embedded_y)
+
+        current_length = embedded_y.shape[1]
+        prompt_offset = prompt_frames + 1
+
+        if target_total is not None:
+            est_total = int(target_total) + 1
+        elif cutoff_limit is not None:
+            est_total = int(cutoff_limit)
+        else:
+            lookahead = getattr(self.args, "progress_lookahead_secs", 2.0)
+            est_total = int(current_length + int(self.args.encodec_sr) * lookahead)
+        est_total = max(est_total, current_length)
+
+        max_gen_length = est_total + int(getattr(self.args, "encodec_sr", 50) * 10)
+        full_dec_attention_mask = torch.ones(
+            (num_samples, max_gen_length), dtype=torch.long, device=device
+        )
+        decoder_attention_mask = torch.ones(
+            (num_samples, current_length), dtype=torch.long, device=device
+        )
+
+        pm_kwargs = {}
+        if getattr(self.args, "use_pm_rope", 1):
+            base = torch.arange(current_length, device=device, dtype=torch.float32).unsqueeze(0)
+            decoder_position_ids_full = base / max(1, est_total - 1) * self.progress_scale
+            decoder_position_ids_full = decoder_position_ids_full.expand(num_samples, -1)
+            pm_kwargs["position_ids"] = decoder_position_ids_full
+            pm_kwargs["pm_decoder_position_ids"] = decoder_position_ids_full
+            pm_kwargs["pm_encoder_position_ids"] = encoder_position_ids
+        else:
+            pm_kwargs["position_ids"] = None
+
+        # Initial decoder forward
+        decoder_outputs = self.decoder_module(
+            inputs_embeds=embedded_y,
+            attention_mask=decoder_attention_mask,
+            encoder_hidden_states=memory,
+            encoder_attention_mask=encoder_attention_mask,
+            use_cache=True,
+            **pm_kwargs,
+        )
+        last_hidden = decoder_outputs.last_hidden_state[:, -1:, :]  # [B, 1, hidden]
+        past_key_values = decoder_outputs.past_key_values
+
+        # Pre-allocate buffers for all samples
+        max_new_tokens = max_gen_length - current_length
+        generated_buffer = torch.zeros((num_samples, max_new_tokens), device=device, dtype=torch.long)
+        gen_lengths = torch.zeros(num_samples, device=device, dtype=torch.long)
+
+        # Track which samples are still active
+        active_mask = torch.ones(num_samples, device=device, dtype=torch.bool)
+
+        # Pre-compute constants
+        eog_tensor = torch.tensor(eog_inference, device=device, dtype=torch.long)
+        silence_tensor = torch.tensor(silence_tokens, device=device, dtype=torch.long) if silence_tokens else None
+        encodec_sr = int(self.args.encodec_sr)
+        text_mode = getattr(self.args, "text_input_type", "text") == "text"
+        frames_per_token_cap = getattr(self.args, "text_guard_frames_per_token", 0)
+        first_input_len = int(x_lens[0].item())
+        extra_cutoff_frames = int(encodec_sr * getattr(self.args, "extra_cutoff", 5))
+
+        # Per-sample state
+        prev_tokens = torch.full((num_samples,), -1, device=device, dtype=torch.long)
+        consec_silence_counts = torch.zeros(num_samples, device=device, dtype=torch.long)
+
+        pos_buffer = torch.zeros((num_samples, 1), device=device, dtype=torch.float32)
+        cur_num_gen = 0
+
+        while active_mask.any():
+            # Predict logits for all active samples
+            logits = self.predict_layer[0](last_hidden).squeeze(1)  # [B, vocab]
+
+            # Apply sampling adjustments
+            effective_length = max(0, current_length - prompt_offset)
+
+            # Suppress EOG at start
+            if effective_length == 0:
+                logits[:, eog_inference] = -1e9
+            if cur_num_gen <= encodec_sr // 5:
+                logits[:, eog_inference] = -10000.0
+
+            # Get top_k value
+            if isinstance(top_k, list):
+                kk = top_k[min(len(top_k) - 1, cur_num_gen)]
+            else:
+                kk = top_k
+
+            # Batched sampling
+            if temperature != 1.0:
+                logits = logits / temperature
+            logits = top_k_top_p_filtering(logits, top_k=kk, top_p=top_p, min_p=min_p)
+            probs = torch.nn.functional.softmax(logits, dim=-1)
+            tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)  # [B]
+
+            # Check EOG for each sample
+            is_eog = (tokens == eog_tensor) | (logits.argmax(dim=-1) == eog_tensor)
+
+            # Time budget check
+            time_budget_exceeded = (
+                target_total is not None
+                and cur_num_gen > (target_total - prompt_offset + extra_cutoff_frames)
+            )
+
+            # Length budget check
+            length_budget_exceeded = False
+            if not text_mode:
+                token_budget = first_input_len * max(1, encodec_sr // 4)
+                length_budget_exceeded = effective_length > token_budget
+            elif frames_per_token_cap > 0:
+                token_budget = max(1, first_input_len) * frames_per_token_cap
+                length_budget_exceeded = effective_length > token_budget
+
+            # Determine which samples should stop
+            should_stop = is_eog | time_budget_exceeded | length_budget_exceeded
+
+            # For samples that should stop, set token to EOG
+            tokens = torch.where(should_stop, eog_tensor, tokens)
+
+            # Store tokens without a Python loop (reduces overhead).
+            generated_buffer[active_mask, cur_num_gen] = tokens[active_mask]
+            gen_lengths[active_mask] += 1
+
+            # Update active mask
+            newly_finished = should_stop & active_mask
+            active_mask = active_mask & ~should_stop
+
+            cur_num_gen += 1
+            current_length += 1
+
+            if not active_mask.any():
+                break
+
+            # Update prev_tokens for silence tracking
+            prev_tokens = tokens
+
+            # Get embeddings for next step (only for active samples, but we process all for simplicity)
+            tokens_2d = tokens.unsqueeze(1)  # [B, 1]
+            samples_emb = self.audio_embedding[0](tokens_2d)  # [B, 1, hidden]
+            samples_emb = self.audio_dropout(samples_emb)
+
+            # Update position
+            if getattr(self.args, "use_pm_rope", 1):
+                new_pos_value = float(current_length - 1) / max(1, est_total - 1) * self.progress_scale
+                new_pos_value = min(new_pos_value, self.progress_scale)
+                pos_buffer.fill_(new_pos_value)
+                pm_kwargs = {
+                    "position_ids": pos_buffer,
+                    "pm_decoder_position_ids": pos_buffer,
+                    "pm_encoder_position_ids": encoder_position_ids,
+                }
+            else:
+                pm_kwargs = {"position_ids": None}
+
+            # Decoder forward
+            decoder_outputs = self.decoder_module(
+                inputs_embeds=samples_emb,
+                attention_mask=full_dec_attention_mask[:, :current_length],
+                encoder_hidden_states=memory,
+                encoder_attention_mask=encoder_attention_mask,
+                past_key_values=past_key_values,
+                use_cache=True,
+                **pm_kwargs,
+            )
+            past_key_values = decoder_outputs.past_key_values
+            last_hidden = decoder_outputs.last_hidden_state
+
+        # Collect results
+        all_results = []
+        all_generated = []
+        y_single = y[0]  # [1, T]
+
+        for i in range(num_samples):
+            gen_len = gen_lengths[i].item()
+            if gen_len > 0:
+                generated_tensor = generated_buffer[i:i+1, :gen_len]  # [1, gen_len]
+            else:
+                generated_tensor = torch.zeros((1, 0), device=device, dtype=torch.long)
+
+            expected_y_len = y_len + generated_tensor.shape[1]
+            res = torch.cat([y_single, generated_tensor], dim=1).unsqueeze(0)  # [1, 1, total]
+
+            if self.args.special_first:
+                res = res - int(self.args.n_special)
+                generated_tensor = generated_tensor - int(self.args.n_special)
+
+            all_results.append(res)
+            all_generated.append(generated_tensor.unsqueeze(0))
+
+        return all_results, all_generated
+
     def load_state_dict(self, state_dict: Dict[str, torch.Tensor], strict: bool = True):
         """Load weights while skipping legacy `accuracy_metrics.*` entries.
 

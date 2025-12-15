@@ -104,6 +104,17 @@ python inference_gradio.py \
     --port 7860
 ```
 
+#### バッチ生成（single GPU）
+
+- `--max_batch` でUIのスライダー上限を変更できます（デフォルト: `4`）。
+- `batch_count > 1` のとき、可能なら `inference_tts_batch` を使って1回の推論ループで複数サンプルを生成します（古いremote-codeチェックポイント向けに自動パッチも行います）。`Model lacks inference_tts_batch` が表示される場合は直列実行にフォールバックします。
+- 注意: バッチ生成は主にスループット改善（1リクエストで複数サンプル生成）向けで、1サンプルあたりのレイテンシ短縮を保証するものではありません。
+
+#### 性能関連の切り替え（Gradio）
+
+- `T5GEMMA_DETERMINISTIC=1`: cuDNNの決定論設定を有効化（通常は遅くなります）。デフォルトは速度優先です。
+- `T5GEMMA_EMPTY_CACHE=1`: 推論後に `torch.cuda.empty_cache()` を呼びます（低VRAM対策には有効な場合がありますが、遅くなることが多いです）。
+
 デフォルトでは、日本語音声の品質のためにXCodec2-Variant（NandemoGHS/Anime-XCodec2-44.1kHz-v2）が使用されます。英語および中国語音声には、元のXCodec2モデルの使用を推奨します。
 
 ```bash

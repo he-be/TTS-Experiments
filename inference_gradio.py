@@ -9,6 +9,7 @@ import argparse
 import os
 import random
 from functools import lru_cache
+from types import MethodType
 from typing import Optional, Tuple
 
 import gradio as gr
@@ -36,7 +37,7 @@ except ImportError:  # pragma: no cover
 # Helpers
 # ---------------------------------------------------------------------------
 
-def seed_everything(seed: Optional[int]) -> int:
+def seed_everything(seed: Optional[int], *, deterministic: bool = False) -> int:
     """
     Seed all RNGs. If seed is None, draw a fresh random seed and return it.
     """
@@ -48,9 +49,12 @@ def seed_everything(seed: Optional[int]) -> int:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    # Determinism costs performance; prefer speed by default.
+    torch.backends.cudnn.deterministic = bool(deterministic)
+    torch.backends.cudnn.benchmark = not bool(deterministic)
     return seed
 
 
@@ -79,12 +83,35 @@ def _load_resources(
         raise ImportError("Please install transformers before running the demo.")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cuda":
+        # Favor throughput on modern NVIDIA GPUs (TF32 for matmul/conv where applicable).
+        torch.set_float32_matmul_precision("high")
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
     model = AutoModelForSeq2SeqLM.from_pretrained(
         model_dir,
         trust_remote_code=True,
         dtype=torch.bfloat16,
     ).to(device)
     model.eval()
+
+    # Some older exported checkpoints ship remote code without `inference_tts_batch`.
+    # Monkey-patch it from this repo's HF wrapper when missing.
+    try:
+        from hf_export.modeling_t5gemma_voice import T5GemmaVoiceForConditionalGeneration as _LocalHFModel
+
+        target = model._orig_mod if hasattr(model, "_orig_mod") else model
+        if not hasattr(target, "inference_tts_batch") and hasattr(_LocalHFModel, "inference_tts_batch"):
+            patched = MethodType(_LocalHFModel.inference_tts_batch, target)
+            setattr(target, "inference_tts_batch", patched)
+            # Also expose it on the outer compiled wrapper if present.
+            if target is not model:
+                setattr(model, "inference_tts_batch", MethodType(_LocalHFModel.inference_tts_batch, model))
+            print("[Info] Patched missing inference_tts_batch onto loaded model.")
+    except Exception as e:
+        print(f"[Warning] Failed to patch inference_tts_batch; will run sequentially: {e}")
+
     cfg = model.config
 
     tokenizer_name = getattr(cfg, "text_tokenizer_name", None) or getattr(cfg, "t5gemma_model_name", None)
@@ -148,12 +175,12 @@ def run_inference(
     resources: dict,
     cut_off_sec: int = 100,
     lang: Optional[str] = None,
-) -> Tuple[int, np.ndarray]:
+    batch_count: int = 1,
+) -> list:
     """
-    Run TTS and return a (sample_rate, waveform) tuple for Gradio playback.
+    Run TTS and return a list of (sample_rate, waveform) tuples for Gradio playback.
+    When batch_count > 1, generates multiple samples with different seeds.
     """
-    used_seed = seed_everything(None if seed is None else int(seed))
-
     model = resources["model"]
     cfg = resources["cfg"]
     text_tokenizer = resources["text_tokenizer"]
@@ -165,7 +192,10 @@ def run_inference(
     silence_tokens = []
     repeat_prompt = 0  # fixed; UI removed
     stop_repetition = 3  # keep sensible default from CLI HF script
-    sample_batch_size = 1
+    batch_mode = batch_count > 1 and hasattr(model, "inference_tts_batch")
+    if batch_count > 1 and not batch_mode:
+        print("[Info] Model lacks inference_tts_batch; using sequential per-sample generation.")
+    sample_batch_size = batch_count if batch_mode else 1
 
     no_reference_audio = reference_speech is None or str(reference_speech).strip().lower() in {"", "none", "null"}
     has_reference_text = reference_text not in (None, "", "none", "null")
@@ -220,46 +250,98 @@ def run_inference(
         "sample_batch_size": sample_batch_size,
     }
 
-    concat_audio, gen_audio = inference_one_sample(
-        model=model,
-        model_args=cfg,
-        text_tokenizer=text_tokenizer,
-        audio_tokenizer=audio_tokenizer,
-        audio_fn=None if no_reference_audio else reference_speech,
-        target_text=target_text,
-        lang=lang_code,
-        device=device,
-        decode_config=decode_config,
-        prompt_end_frame=prompt_end_frame,
-        target_generation_length=target_generation_length,
-        prefix_transcript=prefix_transcript,
-        multi_trial=[],
-        repeat_prompt=repeat_prompt,
-        return_frames=False,
-    )
+    results = []
+    if batch_mode:
+        base_seed = seed if seed is not None else random.SystemRandom().randint(0, 2**31 - 1)
+        used_seed = seed_everything(base_seed, deterministic=bool(int(os.getenv("T5GEMMA_DETERMINISTIC", "0"))))
+        print(f"\n[Info] Running batched generation of {batch_count} samples on one GPU (seed base: {used_seed})...")
 
-    # Take generated audio, move to CPU, convert to numpy for Gradio
-    gen_audio = gen_audio[0].detach().cpu()
-    if gen_audio.ndim == 2 and gen_audio.shape[0] == 1:
-        gen_audio = gen_audio.squeeze(0)
-    waveform = gen_audio.numpy()
+        concat_audio, gen_audio = inference_one_sample(
+            model=model,
+            model_args=cfg,
+            text_tokenizer=text_tokenizer,
+            audio_tokenizer=audio_tokenizer,
+            audio_fn=None if no_reference_audio else reference_speech,
+            target_text=target_text,
+            lang=lang_code,
+            device=device,
+            decode_config=decode_config,
+            prompt_end_frame=prompt_end_frame,
+            target_generation_length=target_generation_length,
+            prefix_transcript=prefix_transcript,
+            multi_trial=[],
+            repeat_prompt=repeat_prompt,
+            return_frames=False,
+        )
 
-    max_abs = float(np.max(np.abs(waveform)))
-    rms = float(np.sqrt(np.mean(waveform**2)))
-    print(f"[Info] Generated audio stats -> max_abs: {max_abs:.6f}, rms: {rms:.6f}")
-    print(f"[Info] Seed used for this run: {used_seed}")
+        batch_concat = concat_audio if isinstance(concat_audio, (list, tuple)) else [concat_audio]
+        batch_gen = gen_audio if isinstance(gen_audio, (list, tuple)) else [gen_audio]
 
-    return codec_audio_sr, waveform
+        for i, gen in enumerate(batch_gen):
+            gen_audio_tensor = gen[0].detach().cpu()
+            if gen_audio_tensor.ndim == 2 and gen_audio_tensor.shape[0] == 1:
+                gen_audio_tensor = gen_audio_tensor.squeeze(0)
+            waveform = gen_audio_tensor.numpy()
+
+            max_abs = float(np.max(np.abs(waveform)))
+            rms = float(np.sqrt(np.mean(waveform**2)))
+            print(f"[Info] Sample {i+1} stats -> max_abs: {max_abs:.6f}, rms: {rms:.6f}, seed base: {used_seed}")
+
+            results.append((codec_audio_sr, waveform))
+    else:
+        # Generate seeds for batch (sequential fallback)
+        base_seed = seed if seed is not None else random.SystemRandom().randint(0, 2**31 - 1)
+        seeds = [base_seed + i for i in range(batch_count)]
+
+        if batch_count > 1:
+            print("[Info] Model lacks inference_tts_batch; running samples sequentially on one GPU.")
+
+        for i, s in enumerate(seeds):
+            print(f"\n[Info] Generating sample {i+1}/{batch_count} with seed {s}...")
+            used_seed = seed_everything(s, deterministic=bool(int(os.getenv("T5GEMMA_DETERMINISTIC", "0"))))
+
+            concat_audio, gen_audio = inference_one_sample(
+                model=model,
+                model_args=cfg,
+                text_tokenizer=text_tokenizer,
+                audio_tokenizer=audio_tokenizer,
+                audio_fn=None if no_reference_audio else reference_speech,
+                target_text=target_text,
+                lang=lang_code,
+                device=device,
+                decode_config=decode_config,
+                prompt_end_frame=prompt_end_frame,
+                target_generation_length=target_generation_length,
+                prefix_transcript=prefix_transcript,
+                multi_trial=[],
+                repeat_prompt=repeat_prompt,
+                return_frames=False,
+            )
+
+            # Take generated audio, move to CPU, convert to numpy for Gradio
+            gen_audio = gen_audio[0].detach().cpu()
+            if gen_audio.ndim == 2 and gen_audio.shape[0] == 1:
+                gen_audio = gen_audio.squeeze(0)
+            waveform = gen_audio.numpy()
+
+            max_abs = float(np.max(np.abs(waveform)))
+            rms = float(np.sqrt(np.mean(waveform**2)))
+            print(f"[Info] Sample {i+1} stats -> max_abs: {max_abs:.6f}, rms: {rms:.6f}, seed: {used_seed}")
+
+            results.append((codec_audio_sr, waveform))
+
+    return results
 
 
 # ---------------------------------------------------------------------------
 # Gradio UI
 # ---------------------------------------------------------------------------
 
-def build_demo(resources, server_port: int, share: bool):
+def build_demo(resources, server_port: int, share: bool, max_batch: int = 4):
     description = (
         "Reference speech is optional. If provided without reference text, Whisper (large-v3-turbo) "
-        "will auto-transcribe and use it as the prompt text."
+        "will auto-transcribe and use it as the prompt text.\n\n"
+        "**Batch Generation**: Set batch count > 1 to generate multiple samples with different seeds."
     )
 
     with gr.Blocks() as demo:
@@ -293,6 +375,14 @@ def build_demo(resources, server_port: int, share: bool):
                 value="",
                 placeholder="Leave blank to use a random seed each run",
             )
+            batch_count_box = gr.Slider(
+                label="Batch Count",
+                minimum=1,
+                maximum=max_batch,
+                step=1,
+                value=1,
+                info="Number of samples to generate with different seeds",
+            )
 
         with gr.Row():
             top_k_box = gr.Slider(label="top_k", minimum=0, maximum=100, step=1, value=30)
@@ -301,7 +391,18 @@ def build_demo(resources, server_port: int, share: bool):
             temperature_box = gr.Slider(label="temperature", minimum=0.1, maximum=2.0, step=0.05, value=0.8)
 
         generate_button = gr.Button("Generate")
-        output_audio = gr.Audio(label="Generated Audio", type="numpy", interactive=False)
+
+        # Create multiple audio outputs for batch generation
+        output_audios = []
+        with gr.Row():
+            for i in range(max_batch):
+                audio = gr.Audio(
+                    label=f"Generated Audio {i+1}",
+                    type="numpy",
+                    interactive=False,
+                    visible=(i == 0),  # Only first one visible by default
+                )
+                output_audios.append(audio)
 
         def gradio_inference(
             reference_speech,
@@ -313,12 +414,15 @@ def build_demo(resources, server_port: int, share: bool):
             min_p,
             temperature,
             seed,
+            batch_count,
         ):
             dur = float(target_duration) if str(target_duration).strip() not in {"", "None", "none"} else None
             seed_val = None
             if str(seed).strip() not in {"", "None", "none"}:
                 seed_val = int(float(seed))
-            sr, wav = run_inference(
+            batch_count = int(batch_count)
+
+            results = run_inference(
                 reference_speech=reference_speech,
                 reference_text=reference_text,
                 target_text=target_text,
@@ -329,8 +433,19 @@ def build_demo(resources, server_port: int, share: bool):
                 temperature=temperature,
                 seed=seed_val,
                 resources=resources,
+                batch_count=batch_count,
             )
-            return (sr, wav)
+
+            # Prepare outputs: update visibility and audio data
+            outputs = []
+            for i in range(max_batch):
+                if i < len(results):
+                    sr, wav = results[i]
+                    outputs.append(gr.update(value=(sr, wav), visible=True))
+                else:
+                    outputs.append(gr.update(value=None, visible=False))
+
+            return outputs
 
         generate_button.click(
             fn=gradio_inference,
@@ -344,8 +459,9 @@ def build_demo(resources, server_port: int, share: bool):
                 min_p_box,
                 temperature_box,
                 seed_box,
+                batch_count_box,
             ],
-            outputs=[output_audio],
+            outputs=output_audios,
         )
 
     demo.launch(server_name="0.0.0.0", server_port=server_port, share=share, debug=True)
@@ -366,6 +482,7 @@ def main():
     parser.add_argument("--port", type=int, default=7860, help="Gradio server port")
     parser.add_argument("--share", action="store_true", help="Enable Gradio share link")
     parser.add_argument("--no_compile", action="store_true", help="Disable torch.compile (faster startup, slower inference)")
+    parser.add_argument("--max_batch", type=int, default=4, help="Maximum batch count for parallel generation")
     args = parser.parse_args()
 
     if args.low_vram:
@@ -383,7 +500,7 @@ def main():
         cpu_codec=args.cpu_codec,
         whisper_device=whisper_device,
     )
-    build_demo(resources=resources, server_port=args.port, share=args.share)
+    build_demo(resources=resources, server_port=args.port, share=args.share, max_batch=args.max_batch)
 
 
 if __name__ == "__main__":

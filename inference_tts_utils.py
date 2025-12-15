@@ -300,40 +300,80 @@ def inference_one_sample(
             [int(original_audio.shape[1] + codec_sr * target_generation_length + effective_delay_inc)]
         )
 
-    assert decode_config["sample_batch_size"] <= 1
+    sample_batch_size = int(decode_config.get("sample_batch_size", 1))
     stime = time.time()
     assert multi_trial == []
-    if not quiet:
-        logging.info("running inference with batch size 1")
 
-    concat_frames, gen_frames = model.inference_tts(
-        text_tokens.to(device),
-        text_tokens_lens.to(device),
-        original_audio.to(device),
-        tgt_y_lens=tgt_y_lens.to(device),
-        top_k=decode_config["top_k"],
-        top_p=decode_config["top_p"],
-        min_p=decode_config["min_p"],
-        temperature=decode_config["temperature"],
-        stop_repetition=decode_config["stop_repetition"],
-        silence_tokens=silence_tokens,
-        prompt_frames=prompt_frames,
-    )
+    batch_mode = sample_batch_size > 1 and hasattr(model, "inference_tts_batch")
+    if batch_mode:
+        if not quiet:
+            logging.info("running inference with batch size %d (parallel on one GPU)", sample_batch_size)
+        concat_frames, gen_frames = model.inference_tts_batch(
+            text_tokens.to(device),
+            text_tokens_lens.to(device),
+            original_audio.to(device),
+            tgt_y_lens=tgt_y_lens.to(device),
+            num_samples=sample_batch_size,
+            top_k=decode_config["top_k"],
+            top_p=decode_config["top_p"],
+            min_p=decode_config["min_p"],
+            temperature=decode_config["temperature"],
+            stop_repetition=decode_config["stop_repetition"],
+            silence_tokens=silence_tokens,
+            prompt_frames=prompt_frames,
+        )
+    else:
+        if sample_batch_size > 1:
+            raise ValueError("Model does not support batched inference_tts_batch; set sample_batch_size=1.")
+        if not quiet:
+            logging.info("running inference with batch size 1")
+        concat_frames, gen_frames = model.inference_tts(
+            text_tokens.to(device),
+            text_tokens_lens.to(device),
+            original_audio.to(device),
+            tgt_y_lens=tgt_y_lens.to(device),
+            top_k=decode_config["top_k"],
+            top_p=decode_config["top_p"],
+            min_p=decode_config["min_p"],
+            temperature=decode_config["temperature"],
+            stop_repetition=decode_config["stop_repetition"],
+            silence_tokens=silence_tokens,
+            prompt_frames=prompt_frames,
+        )
 
     inference_time = time.time() - stime
-    num_generated_tokens = gen_frames.shape[-1]
-    tokens_per_sec = num_generated_tokens / inference_time if inference_time > 0 else 0.0
-    audio_duration = num_generated_tokens / codec_sr
-    real_time_factor = audio_duration / inference_time if inference_time > 0 else 0.0
-
-    if not quiet:
-        logging.info(f"inference on one sample take: {inference_time:.4f} sec.")
-        logging.info(
-            f"generated encoded_frames.shape: {gen_frames.shape}, "
-            f"which is {audio_duration:.2f} sec."
+    if isinstance(gen_frames, (list, tuple)):
+        per_sample_tokens = [int(g.shape[-1]) for g in gen_frames]
+        total_generated_tokens = int(sum(per_sample_tokens))
+        avg_generated_tokens = float(total_generated_tokens) / max(1, len(per_sample_tokens))
+        tokens_per_sec = total_generated_tokens / inference_time if inference_time > 0 else 0.0
+        avg_audio_duration = avg_generated_tokens / codec_sr
+        real_time_factor = avg_audio_duration / inference_time if inference_time > 0 else 0.0
+        if not quiet:
+            logging.info(f"inference on batch take: {inference_time:.4f} sec.")
+            logging.info(
+                f"generated batch sizes: {per_sample_tokens} tokens (avg {avg_generated_tokens:.1f})."
+            )
+        print(
+            f"[Speed] {tokens_per_sec:.2f} tokens/s (total) | RTF: {real_time_factor:.2f}x (avg) | "
+            f"Generated {total_generated_tokens} tokens across {len(per_sample_tokens)} samples in {inference_time:.2f}s"
         )
-    print(f"[Speed] {tokens_per_sec:.2f} tokens/s | RTF: {real_time_factor:.2f}x | "
-          f"Generated {num_generated_tokens} tokens in {inference_time:.2f}s")
+    else:
+        num_generated_tokens = int(gen_frames.shape[-1])
+        tokens_per_sec = num_generated_tokens / inference_time if inference_time > 0 else 0.0
+        audio_duration = num_generated_tokens / codec_sr
+        real_time_factor = audio_duration / inference_time if inference_time > 0 else 0.0
+
+        if not quiet:
+            logging.info(f"inference on one sample take: {inference_time:.4f} sec.")
+            logging.info(
+                f"generated encoded_frames.shape: {gen_frames.shape}, "
+                f"which is {audio_duration:.2f} sec."
+            )
+        print(
+            f"[Speed] {tokens_per_sec:.2f} tokens/s | RTF: {real_time_factor:.2f}x | "
+            f"Generated {num_generated_tokens} tokens in {inference_time:.2f}s"
+        )
 
     def _strip_sep_and_eos(frames: torch.Tensor, sep_token: Optional[int], eos_token: Optional[int]) -> torch.Tensor:
         # keep all by default, then drop sep/eos if provided
@@ -365,30 +405,48 @@ def inference_one_sample(
         cleaned_vals = frames[mask]
         return cleaned_vals.view(frames.size(0), frames.size(1), new_len)
 
-    concat_frames = _strip_sep_and_eos(concat_frames, y_sep_token, eos_token)
-    gen_frames = _strip_sep_and_eos(gen_frames, y_sep_token, eos_token)
+    # Support batched outputs (lists) and single outputs (tensors)
+    concat_frames_list = concat_frames if isinstance(concat_frames, (list, tuple)) else [concat_frames]
+    gen_frames_list = gen_frames if isinstance(gen_frames, (list, tuple)) else [gen_frames]
 
-    concat_sample = None
-    if has_reference_audio:
-        try:
-            concat_sample = audio_tokenizer.decode(concat_frames)
-        except Exception as exc:
-            logging.warning(f"Failed to decode concatenated prompt audio: {exc}")
+    cleaned_concat_frames = []
+    cleaned_gen_frames = []
+    concat_samples = []
+    gen_samples = []
 
-    gen_sample = audio_tokenizer.decode(gen_frames)
+    for cf, gf in zip(concat_frames_list, gen_frames_list):
+        cf_clean = _strip_sep_and_eos(cf, y_sep_token, eos_token)
+        gf_clean = _strip_sep_and_eos(gf, y_sep_token, eos_token)
+        cleaned_concat_frames.append(cf_clean)
+        cleaned_gen_frames.append(gf_clean)
 
-    if concat_sample is None:
-        concat_sample = gen_sample
+        concat_sample = None
+        if has_reference_audio:
+            try:
+                concat_sample = audio_tokenizer.decode(cf_clean)
+            except Exception as exc:
+                logging.warning(f"Failed to decode concatenated prompt audio: {exc}")
 
-    if torch.cuda.is_available():
+        gen_sample = audio_tokenizer.decode(gf_clean)
+
+        if concat_sample is None:
+            concat_sample = gen_sample
+
+        concat_samples.append(concat_sample)
+        gen_samples.append(gen_sample)
+
+    # Clearing the CUDA cache forces synchronization and often hurts latency.
+    # Keep it opt-in for low-VRAM environments.
+    if torch.cuda.is_available() and os.getenv("T5GEMMA_EMPTY_CACHE", "0") not in {"0", "", "false", "False"}:
         torch.cuda.empty_cache()
 
     if return_frames:
-        return (
-            concat_sample,
-            gen_sample,
-            concat_frames.detach().cpu(),
-            gen_frames.detach().cpu(),
-        )
+        concat_cpu = [cf.detach().cpu() for cf in cleaned_concat_frames]
+        gen_cpu = [gf.detach().cpu() for gf in cleaned_gen_frames]
+        if len(concat_cpu) == 1:
+            return concat_samples[0], gen_samples[0], concat_cpu[0], gen_cpu[0]
+        return concat_samples, gen_samples, concat_cpu, gen_cpu
 
-    return concat_sample, gen_sample
+    if len(concat_samples) == 1:
+        return concat_samples[0], gen_samples[0]
+    return concat_samples, gen_samples

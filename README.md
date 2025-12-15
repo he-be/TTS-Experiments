@@ -106,6 +106,17 @@ python inference_gradio.py \
     --port 7860
 ```
 
+#### Batch generation (single GPU)
+
+- Use `--max_batch` to set the UI slider limit (default: `4`).
+- When `batch_count > 1`, the demo will use `inference_tts_batch` if available (or auto-patch it for some older remote-code checkpoints). If you still see `Model lacks inference_tts_batch`, it will fall back to sequential generation.
+- Note: batch generation primarily improves throughput (multiple samples per request); it does not guarantee lower latency per sample.
+
+#### Performance toggles (Gradio)
+
+- `T5GEMMA_DETERMINISTIC=1`: enable deterministic cuDNN settings (usually slower). Default is speed-oriented.
+- `T5GEMMA_EMPTY_CACHE=1`: call `torch.cuda.empty_cache()` after inference (helps low-VRAM setups, often slower).
+
 By default, XCodec2-Variant (NandemoGHS/Anime-XCodec2-44.1kHz-v2) is used for audio decoding to better support Japanese voices. For English and Chinese voices, I recommend using the original XCodec2 model.
 
 ```bash
