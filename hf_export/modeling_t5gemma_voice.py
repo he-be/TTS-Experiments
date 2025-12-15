@@ -658,29 +658,56 @@ class T5GemmaVoiceForConditionalGeneration(PreTrainedModel, GenerationMixin):
         last_hidden = decoder_outputs.last_hidden_state[:, -1:, :]
         past_key_values = decoder_outputs.past_key_values
 
-        generated_tokens: List[torch.Tensor] = []
-        cur_num_gen = 0
-        prev_token = -1
-        consec_silence_count = 0
-        silence_set = set(silence_tokens)
+        # Pre-allocate buffers to avoid per-step tensor creation
+        max_new_tokens = max_gen_length - current_length
+        generated_buffer = torch.zeros((1, max_new_tokens), device=device, dtype=torch.long)
+        gen_idx = 0
 
-        def sample_helper(
-            logits,
+        # Pre-allocate position buffer for PM-RoPE (reused each iteration)
+        pos_buffer = torch.zeros((1, 1), device=device, dtype=torch.float32)
+
+        # Pre-compute silence tokens tensor on GPU for faster comparison
+        silence_tensor = torch.tensor(silence_tokens, device=device, dtype=torch.long) if silence_tokens else None
+
+        # Pre-compute EOG token tensor for GPU-side comparison
+        eog_tensor = torch.tensor(eog_inference, device=device, dtype=torch.long)
+
+        cur_num_gen = 0
+        prev_token_tensor = torch.tensor([-1], device=device, dtype=torch.long)
+        consec_silence_count = 0
+
+        # Pre-compute values that don't change during generation
+        text_mode = getattr(self.args, "text_input_type", "text") == "text"
+        frames_per_token_cap = getattr(self.args, "text_guard_frames_per_token", 0)
+        first_input_len = int(x_lens[0].item())  # Only one sync at start
+        encodec_sr = int(self.args.encodec_sr)
+        extra_cutoff_frames = int(encodec_sr * getattr(self.args, "extra_cutoff", 5))
+
+        def sample_helper_gpu(
+            logits: torch.Tensor,
             top_k,
-            top_p,
-            min_p,
-            temperature,
-            prev_token,
-            consec_silence_count,
-            stop_repetition,
-            silence_tokens,
-            cur_num_gen,
-            current_length,
+            top_p: float,
+            min_p: float,
+            temperature: float,
+            prev_token_t: torch.Tensor,
+            consec_silence_count: int,
+            stop_repetition: int,
+            cur_num_gen: int,
+            current_length: int,
             target_total,
-            prompt_offset,
+            prompt_offset: int,
         ):
+            """
+            Optimized sample_helper that minimizes CPU-GPU synchronization.
+            Returns: (token, should_stop, new_consec_silence_count)
+            - token: GPU tensor [1]
+            - should_stop: bool (single sync point)
+            - new_consec_silence_count: int
+            """
             effective_length = max(0, current_length - prompt_offset)
             logits_adjust = logits
+
+            # Suppress EOG at start of generation
             if effective_length == 0:
                 logits_adjust[eog_inference] = -1e9
 
@@ -689,23 +716,23 @@ class T5GemmaVoiceForConditionalGeneration(PreTrainedModel, GenerationMixin):
             else:
                 kk = top_k
 
-            if cur_num_gen <= self.args.encodec_sr // 5:
+            # Suppress EOG for first few frames
+            if cur_num_gen <= encodec_sr // 5:
                 logits_adjust[eog_inference] = -10000.0
 
-            if (
-                stop_repetition > 0
-                and prev_token in silence_tokens
-                and consec_silence_count > stop_repetition
-            ):
-                if logits_adjust[prev_token] < 0:
-                    logits_adjust[prev_token] = logits_adjust[prev_token] * (
-                        consec_silence_count - (stop_repetition - 1)
-                    )
-                else:
-                    logits_adjust[prev_token] = logits_adjust[prev_token] / (
-                        consec_silence_count - (stop_repetition - 1)
-                    )
+            # Silence repetition penalty (GPU-side check)
+            if stop_repetition > 0 and consec_silence_count > stop_repetition and silence_tensor is not None:
+                # Check if prev_token is in silence_tokens (GPU comparison)
+                prev_in_silence = (prev_token_t == silence_tensor).any()
+                if prev_in_silence:
+                    prev_idx = prev_token_t.item()  # Need sync here for indexing
+                    penalty = consec_silence_count - (stop_repetition - 1)
+                    if logits_adjust[prev_idx] < 0:
+                        logits_adjust[prev_idx] = logits_adjust[prev_idx] * penalty
+                    else:
+                        logits_adjust[prev_idx] = logits_adjust[prev_idx] / penalty
 
+            # Sample token (stays on GPU)
             token = topk_sampling(
                 logits_adjust,
                 top_k=kk,
@@ -713,70 +740,76 @@ class T5GemmaVoiceForConditionalGeneration(PreTrainedModel, GenerationMixin):
                 min_p=min_p,
                 temperature=temperature,
             )
-            token_id = int(token.item())
 
-            should_force_stop = (
-                token_id == eog_inference or int(torch.argmax(logits).item()) == eog_inference
+            # GPU-side EOG check (single comparison, no sync yet)
+            is_eog = (token.squeeze() == eog_tensor) | (logits.argmax() == eog_tensor)
+
+            # Time/length budget checks (CPU-side, no GPU sync needed)
+            time_budget_exceeded = (
+                target_total is not None
+                and cur_num_gen > (target_total - prompt_offset + extra_cutoff_frames)
             )
 
-            text_mode = getattr(self.args, "text_input_type", "text") == "text"
-            frames_per_token_cap = getattr(self.args, "text_guard_frames_per_token", 0)
-            first_input_len = int(x_lens[0].item())
+            length_budget_exceeded = False
             if not text_mode:
-                token_budget = first_input_len * max(
-                    1, int(self.args.encodec_sr) // 4
-                )
-                should_force_stop = should_force_stop or (
-                    effective_length > token_budget
-                )
+                token_budget = first_input_len * max(1, encodec_sr // 4)
+                length_budget_exceeded = effective_length > token_budget
             elif frames_per_token_cap > 0:
                 token_budget = max(1, first_input_len) * frames_per_token_cap
-                should_force_stop = should_force_stop or (
-                    effective_length > token_budget
-                )
+                length_budget_exceeded = effective_length > token_budget
 
-            time_budget_exceeded = target_total is not None and cur_num_gen > (
-                target_total
-                - prompt_offset
-                + int(self.args.encodec_sr) * getattr(self.args, "extra_cutoff", 5)
-            )
-            if should_force_stop or time_budget_exceeded:
-                token_id = eog_inference
+            # Single sync point: check if we should stop
+            should_stop = is_eog.item() or time_budget_exceeded or length_budget_exceeded
 
-            if token_id in silence_set and token_id == prev_token:
-                consec_silence_count += 1
+            if should_stop:
+                token = eog_tensor.unsqueeze(0)
+
+            # Update silence count (GPU comparison)
+            new_consec_silence_count = consec_silence_count
+            if silence_tensor is not None and silence_tensor.numel() > 0:
+                token_in_silence = (token.squeeze() == silence_tensor).any()
+                token_eq_prev = (token.squeeze() == prev_token_t.squeeze())
+                if token_in_silence.item() and token_eq_prev.item():
+                    new_consec_silence_count += 1
+                else:
+                    new_consec_silence_count = 0
             else:
-                consec_silence_count = 0
-            prev_token = token_id
-            return token_id, prev_token, consec_silence_count
+                new_consec_silence_count = 0
+
+            return token, should_stop, new_consec_silence_count
 
         while True:
             logits = self.predict_layer[0](last_hidden).squeeze(0).squeeze(0)
-            token_id, prev_token, consec_silence_count = sample_helper(
+            token, should_stop, consec_silence_count = sample_helper_gpu(
                 logits,
                 top_k,
                 top_p,
                 min_p,
                 temperature,
-                prev_token,
+                prev_token_tensor,
                 consec_silence_count,
                 stop_repetition,
-                silence_tokens,
                 cur_num_gen,
                 current_length,
                 target_total,
                 prompt_offset,
             )
 
-            token_tensor = torch.tensor([[token_id]], device=device, dtype=torch.long)
-            generated_tokens.append(token_tensor.squeeze(0))
+            # Store token in pre-allocated buffer (GPU->GPU, no transfer)
+            generated_buffer[0, gen_idx] = token.squeeze()
+            gen_idx += 1
             cur_num_gen += 1
             current_length += 1
 
-            if token_id == eog_inference:
+            if should_stop:
                 break
 
-            samples_emb = self.audio_embedding[0](token_tensor)
+            # Update prev_token_tensor for next iteration (in-place)
+            prev_token_tensor = token
+
+            # Get embedding directly from GPU token (no CPU round-trip)
+            token_2d = token.view(1, 1)
+            samples_emb = self.audio_embedding[0](token_2d)
             samples_emb = self.audio_dropout(samples_emb)
 
             if getattr(self.args, "use_pm_rope", 1):
@@ -786,13 +819,11 @@ class T5GemmaVoiceForConditionalGeneration(PreTrainedModel, GenerationMixin):
                     * self.progress_scale
                 )
                 new_pos_value = min(new_pos_value, self.progress_scale)
-                # Avoid torch.cat: create single-token position tensor directly
-                pos_1 = torch.tensor(
-                    [[new_pos_value]], device=device, dtype=torch.float32
-                )
+                # Reuse pre-allocated position buffer (in-place update)
+                pos_buffer.fill_(new_pos_value)
                 pm_kwargs = {
-                    "position_ids": pos_1,
-                    "pm_decoder_position_ids": pos_1,
+                    "position_ids": pos_buffer,
+                    "pm_decoder_position_ids": pos_buffer,
                     "pm_encoder_position_ids": encoder_position_ids,
                 }
             else:
@@ -812,8 +843,9 @@ class T5GemmaVoiceForConditionalGeneration(PreTrainedModel, GenerationMixin):
             past_key_values = decoder_outputs.past_key_values
             last_hidden = decoder_outputs.last_hidden_state
 
-        if generated_tokens:
-            generated_tensor = torch.stack(generated_tokens, dim=1)  # [1, T_gen]
+        # Extract generated tokens from pre-allocated buffer
+        if gen_idx > 0:
+            generated_tensor = generated_buffer[:, :gen_idx]
         else:
             generated_tensor = torch.zeros((1, 0), device=device, dtype=torch.long)
 
