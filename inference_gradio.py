@@ -770,7 +770,15 @@ def build_demo(
                 seed_val = int(float(seed))
             batch_count = int(batch_count)
 
+            # Check if segmentation should be used (auto-disable for single sentence)
+            use_segmentation = enable_segmentation
             if enable_segmentation:
+                segments = segment_text_by_sentences(target_text)
+                if len(segments) <= 1:
+                    print("[Info] Only 1 segment detected, using non-segmented inference.")
+                    use_segmentation = False
+
+            if use_segmentation:
                 # Segmented inference
                 concat_results, segment_results, segment_texts = run_inference_segmented(
                     reference_speech=reference_speech,
