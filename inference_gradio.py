@@ -394,9 +394,7 @@ def run_inference_segmented(
         prefix_transcript = ""
     elif not has_reference_text:
         print("[Info] No reference text; transcribing reference speech with Whisper (large-v3-turbo).")
-        wh_model = _get_whisper_model(resources["whisper_device"])
-        result = wh_model.transcribe(reference_speech)
-        prefix_transcript = result["text"]
+        prefix_transcript = transcribe_audio(reference_speech, resources["whisper_device"])
         print(f"[Info] Whisper transcription: {prefix_transcript}")
     else:
         prefix_transcript = reference_text
@@ -613,9 +611,9 @@ def build_demo(
     resources,
     server_port: int,
     share: bool,
-    max_batch: int = 4,
-    max_segments: int = 10,
-    inter_segment_silence: float = 0.05,
+    max_batch: int = 64,
+    max_segments: int = 64,
+    inter_segment_silence: float = 1.00,
 ):
     description = (
         "Reference speech is optional. If provided without reference text, Whisper (large-v3-turbo) "
