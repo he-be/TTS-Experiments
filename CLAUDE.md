@@ -8,6 +8,15 @@ T5Gemma-TTS is a multilingual Text-to-Speech model based on an Encoder-Decoder L
 
 ## Key Commands
 
+### Development Quick Start
+```bash
+# Quick serve (uses uv and sets env vars)
+sh serve.sh
+
+# Syntax check
+python -m py_compile inference_gradio.py inference_tts_utils.py
+```
+
 ### Inference (HuggingFace format)
 ```bash
 python inference_commandline_hf.py \
@@ -19,6 +28,17 @@ python inference_commandline_hf.py \
 ### Inference (Gradio Web UI)
 ```bash
 python inference_gradio.py --model_dir Aratako/T5Gemma-TTS-2b-2b --port 7860
+
+# With batch generation (improves throughput for multiple samples)
+python inference_gradio.py --model_dir Aratako/T5Gemma-TTS-2b-2b --port 7860 --max_batch 16
+```
+
+### Inference (.pth checkpoint)
+```bash
+python inference_commandline.py \
+    --model_root . \
+    --model_name trained \
+    --target_text "Hello, this is a test."
 ```
 
 ### Training
@@ -58,6 +78,10 @@ python scripts/export_t5gemma_voice_hf_lora.py --ckpt lora.pth --out t5gemma_mer
 - **`steps/optim.py`**: `ScaledAdam` optimizer and `Eden` learning rate scheduler
 - **`data/combined_dataset.py`**: Dataset loader supporting multiple datasets, neighbor prompts for voice cloning, and time stretching
 - **`hf_export/`**: HuggingFace-compatible model wrappers for inference
+  - `modeling_t5gemma_voice.py`: Contains `inference_tts()` and `inference_tts_batch()` for generation
+  - `configuration_t5gemma_voice.py`: Model configuration class
+- **`inference_tts_utils.py`**: Shared TTS pipeline (tokenization, decoding, normalization) used by all inference scripts
+- **`duration_estimator.py`**: Auto-estimates target duration from text/phonemes when not specified
 
 ### Audio Tokenization
 
@@ -98,3 +122,31 @@ For low VRAM environments:
 - `--cpu_whisper`: Run Whisper on CPU (~5GB savings)
 - `--low_vram`: Preset enabling both + disabling torch.compile
 - `--t5_gradient_checkpointing 1`: For training
+
+## Performance Tuning
+
+### Batch Generation (Gradio)
+- Use `--max_batch N` to enable batch inference (generates multiple samples in parallel on single GPU)
+- Batch generation reduces total time for multiple samples by sharing encoder computation and batching decoder steps
+- Older checkpoints without `inference_tts_batch` are auto-patched at load time (inference_gradio.py:99-114)
+
+### Environment Variables
+- `T5GEMMA_DETERMINISTIC=1`: Enable deterministic cuDNN (slower, reproducible)
+- `T5GEMMA_EMPTY_CACHE=1`: Call `torch.cuda.empty_cache()` after inference (helps low-VRAM, often slower)
+
+## Development Workflow
+
+### Code Organization
+- `inference_gradio.py`: Gradio Web UI (HF checkpoints with `trust_remote_code=True`)
+- `inference_commandline_hf.py`: CLI inference for HF checkpoints
+- `inference_commandline.py`: CLI inference for `.pth` bundles
+- `main.py`: Training entry point
+
+### Testing
+No formal test suite exists. For changes:
+- Run `python -m py_compile <files>` for syntax validation
+- Manual smoke test via `sh serve.sh` or CLI inference
+- For performance changes, measure before/after latency and tokens/s
+
+### Commit Style
+Follow imperative, sentence-case commit messages (e.g., "Optimize inference loop to reduce CPU-GPU synchronization")
