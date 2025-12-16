@@ -28,12 +28,22 @@ pip install -r requirements.txt
 
 **注意**: GPUサポートには、`pip install`を実行する前にCUDA対応のPyTorchをインストールしてください：
 ```bash
-pip install torch<=2.8.0 torchaudio --index-url https://download.pytorch.org/whl/cu128
+pip install "torch<=2.8.0" torchaudio --index-url https://download.pytorch.org/whl/cu128
 ```
 
 ## 既知の問題
 
 - **Windows**: 開発者の環境において、Windows上での推論時に生成時間が不安定になったり、処理がハングしたりする問題が確認されています。原因は調査中です。同様の問題が発生した場合は、WSL2、またはDockerを使用することを推奨します。
+
+## 動作確認済み環境
+
+以下の環境で開発者が動作確認を行っています。他の環境でも動作する可能性がありますが、保証はしていません。
+
+| プラットフォーム | 状態 | 備考 |
+|----------|--------|-------|
+| Linux + CUDA | ✅ 確認済み | |
+| Windows + CUDA (Docker) | ✅ 確認済み | ネイティブWindowsには既知の問題あり |
+| Apple Silicon (MPS) | ✅ 確認済み | M4 Max MacBook Pro |
 
 ## クイックスタート
 

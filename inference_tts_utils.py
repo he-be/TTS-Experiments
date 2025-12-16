@@ -12,7 +12,9 @@ import torch
 import torchaudio
 import tqdm
 
-from data.tokenizer import AudioTokenizer, tokenize_audio
+from functools import lru_cache
+
+from data.tokenizer import AudioTokenizer, tokenize_audio, _load_audio
 from duration_estimator import detect_language
 
 
@@ -588,6 +590,8 @@ def inference_one_sample(
     # Keep it opt-in for low-VRAM environments.
     if torch.cuda.is_available() and os.getenv("T5GEMMA_EMPTY_CACHE", "0") not in {"0", "", "false", "False"}:
         torch.cuda.empty_cache()
+    elif torch.backends.mps.is_available():
+        torch.mps.empty_cache()
 
     if return_frames:
         concat_cpu = [cf.detach().cpu() for cf in cleaned_concat_frames]
@@ -599,3 +603,45 @@ def inference_one_sample(
     if len(concat_samples) == 1:
         return concat_samples[0], gen_samples[0]
     return concat_samples, gen_samples
+
+
+# ==== Whisper transcription (transformers, MPS compatible, no ffmpeg) ====
+
+
+@lru_cache(maxsize=2)
+def get_whisper_model(device: str = "cpu"):
+    """Load and cache transformers Whisper model and processor."""
+    from transformers import WhisperProcessor, WhisperForConditionalGeneration
+
+    model_name = "openai/whisper-large-v3-turbo"
+    print(f"[Info] Loading Whisper model ({model_name}) on {device}...")
+    processor = WhisperProcessor.from_pretrained(model_name)
+    model = WhisperForConditionalGeneration.from_pretrained(model_name)
+    model = model.to(device)
+    model.eval()
+    return model, processor
+
+
+def transcribe_audio(audio_path: str, device: str = "cpu") -> str:
+    """Transcribe audio file using transformers Whisper (no ffmpeg required)."""
+    model, processor = get_whisper_model(device)
+
+    # Load audio using shared _load_audio (handles PyTorch 2.9+ compatibility)
+    wav, sr = _load_audio(audio_path)
+    if sr != 16000:
+        wav = torchaudio.transforms.Resample(sr, 16000)(wav)
+    if wav.shape[0] > 1:
+        wav = wav.mean(dim=0, keepdim=True)
+
+    # Prepare input features
+    input_features = processor(
+        wav.squeeze().numpy(),
+        sampling_rate=16000,
+        return_tensors="pt",
+    ).input_features.to(device)
+
+    # Generate transcription
+    with torch.no_grad():
+        predicted_ids = model.generate(input_features)
+
+    return processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]

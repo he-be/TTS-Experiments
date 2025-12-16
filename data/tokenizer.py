@@ -3,6 +3,17 @@ from typing import Any, Optional
 import torch
 import torchaudio
 
+# PyTorch 2.9+ compatibility helper
+def _torch_ge_29() -> bool:
+    """Return True if PyTorch version is >= 2.9."""
+    try:
+        v = torch.__version__.split("+")[0]
+        major, minor = map(int, v.split(".")[:2])
+        return (major, minor) >= (2, 9)
+    except Exception:
+        return False
+
+
 try:
     from huggingface_hub import hf_hub_download
     from safetensors import safe_open
@@ -32,6 +43,8 @@ class AudioTokenizer:
             device = torch.device("cpu")
             if torch.cuda.is_available():
                 device = torch.device("cuda")
+            elif torch.backends.mps.is_available():
+                device = torch.device("mps")
         self._device = device
         self.backend = backend
         self.signature = signature
@@ -87,12 +100,42 @@ class AudioTokenizer:
         recon = self.codec.decode_code(codes)
         return recon
 
+def _load_audio(audio_path: str, offset: int = -1, num_frames: int = -1):
+    """
+    Load audio file using appropriate backend.
+    For PyTorch >= 2.9 without TorchCodec, uses soundfile as fallback.
+    """
+    if _torch_ge_29():
+        # Use soundfile to avoid TorchCodec dependency in PyTorch 2.9+
+        import soundfile as sf
+        info = sf.info(audio_path)
+        sr = info.samplerate
+
+        if offset != -1 and num_frames != -1:
+            wav, _ = sf.read(audio_path, start=offset, stop=offset + num_frames, dtype="float32")
+        else:
+            wav, _ = sf.read(audio_path, dtype="float32")
+
+        # Convert to torch tensor with shape [channels, samples]
+        wav = torch.from_numpy(wav)
+        if wav.ndim == 1:
+            wav = wav.unsqueeze(0)
+        elif wav.ndim == 2:
+            # soundfile returns [samples, channels], transpose to [channels, samples]
+            wav = wav.T
+        return wav, sr
+    else:
+        # Use torchaudio for PyTorch < 2.9
+        if offset != -1 and num_frames != -1:
+            wav, sr = torchaudio.load(audio_path, frame_offset=offset, num_frames=num_frames)
+        else:
+            wav, sr = torchaudio.load(audio_path)
+        return wav, sr
+
+
 def tokenize_audio(tokenizer: AudioTokenizer, audio_path: str, offset = -1, num_frames=-1):
     # Load and pre-process the audio waveform
-    if offset != -1 and num_frames!=-1:
-        wav, sr = torchaudio.load(audio_path, frame_offset=offset, num_frames=num_frames)
-    else:
-        wav, sr = torchaudio.load(audio_path)
+    wav, sr = _load_audio(audio_path, offset, num_frames)
     target_sr = getattr(tokenizer, "encode_sample_rate", tokenizer.sample_rate)
     if sr != target_sr:
         # Ensure float32 for torchaudio resample (avoids Float vs Double mismatch in PyTorch 2.9+)
