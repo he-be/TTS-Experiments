@@ -772,13 +772,11 @@ def build_demo(
 
             # Check if segmentation should be used (auto-disable for single sentence)
             use_segmentation = enable_segmentation
-            segmentation_auto_disabled = False
             if enable_segmentation:
                 segments = segment_text_by_sentences(target_text)
                 if len(segments) <= 1:
                     print("[Info] Only 1 segment detected, using non-segmented inference.")
                     use_segmentation = False
-                    segmentation_auto_disabled = True
 
             if use_segmentation:
                 # Segmented inference
@@ -825,12 +823,6 @@ def build_demo(
                         outputs.append(gr.update(value=None, visible=False))
                         outputs.append(gr.update(value=None, visible=False))
 
-                # UI state updates (segmentation enabled)
-                outputs.append(gr.update())  # checkbox unchanged
-                outputs.append(gr.update(visible=True))  # concat_row
-                outputs.append(gr.update(visible=False))  # batch_row
-                outputs.append(gr.update(visible=True))  # segment_accordion
-
                 return outputs
             else:
                 # Non-segmented inference
@@ -867,26 +859,10 @@ def build_demo(
                     outputs.append(gr.update(value=None, visible=False))
                     outputs.append(gr.update(value=None, visible=False))
 
-                # UI state updates (segmentation disabled)
-                if segmentation_auto_disabled:
-                    # Auto-disabled due to single sentence - update checkbox
-                    outputs.append(gr.update(value=False))  # checkbox off
-                else:
-                    outputs.append(gr.update())  # checkbox unchanged
-                outputs.append(gr.update(visible=False))  # concat_row
-                outputs.append(gr.update(visible=True))  # batch_row
-                outputs.append(gr.update(visible=False))  # segment_accordion
-
                 return outputs
 
         # All outputs in order
-        all_outputs = (
-            concatenated_audio_outputs
-            + output_audios
-            + segment_text_outputs
-            + segment_audio_outputs
-            + [enable_segmentation_box, concat_row, batch_row, segment_accordion]
-        )
+        all_outputs = concatenated_audio_outputs + output_audios + segment_text_outputs + segment_audio_outputs
 
         generate_button.click(
             fn=gradio_inference,
