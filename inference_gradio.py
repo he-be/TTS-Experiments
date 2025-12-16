@@ -601,7 +601,7 @@ def run_inference_segmented(
 
         all_segment_results.append(segment_audios)
 
-        # Concatenate all segments (also trims leading/trailing silence and prepends 1s silence)
+        # Concatenate all segments (also trims leading/trailing silence and prepends 0.5s silence)
         concat_audio = concatenate_audio_segments(segment_audios, silence_sec=inter_segment_silence)
 
         concatenated_results.append(concat_audio)

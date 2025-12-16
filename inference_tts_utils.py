@@ -205,7 +205,7 @@ def concatenate_audio_segments(
 
     Before concatenation, leading/trailing near-silence is trimmed from each segment.
     After concatenation, leading/trailing near-silence is trimmed from the full output,
-    then a fixed 1.0s silence is prepended to the beginning.
+    then a fixed 0.5s silence is prepended to the beginning.
 
     Args:
         segments: List of (sample_rate, waveform) tuples.
@@ -222,7 +222,7 @@ def concatenate_audio_segments(
 
     sample_rate = segments[0][0]
     silence_samples = int(silence_sec * sample_rate)
-    leading_silence_samples = int(1.0 * sample_rate)
+    leading_silence_samples = int(0.5 * sample_rate)
 
     def _trim_leading_trailing_silence(wav: np.ndarray, *, threshold_db: float = -45.0) -> np.ndarray:
         """
@@ -259,7 +259,8 @@ def concatenate_audio_segments(
             trimmed_segments.append(wav)
 
     if not trimmed_segments:
-        return (sample_rate, np.zeros((0,), dtype=segments[0][1].dtype))
+        dtype = segments[0][1].dtype
+        return (sample_rate, np.zeros((leading_silence_samples,), dtype=dtype))
 
     for i, wav in enumerate(trimmed_segments):
         parts.append(wav)

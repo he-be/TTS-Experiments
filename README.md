@@ -117,7 +117,7 @@ python inference_gradio.py \
 - In the UI, enable `Enable Sentence Segmentation / 文分割を有効化` to split `Target Text` by sentence delimiters (Japanese/English punctuation + newlines).
 - If the model has `inference_tts_batch_multi_text` (or can be auto-patched for some older remote-code checkpoints), segments are generated in parallel; otherwise it falls back to sequential per-segment generation.
 - `--max_segments` controls how many segments are shown in the UI (display limit only). When `batch_count > 1`, only the first batch’s per-segment audio is displayed; concatenated outputs are provided for each batch.
-- `--inter_segment_silence` controls the silence (seconds) inserted between segments when concatenating (default: `0.05`). Leading/trailing near-silence is trimmed from each segment (and the final output) before/after concatenation, then a fixed 1.0s silence is prepended to the beginning.
+- `--inter_segment_silence` controls the silence (seconds) inserted between segments when concatenating (default: `0.05`). Leading/trailing near-silence is trimmed from each segment (and the final output) before/after concatenation, then a fixed 0.5s silence is prepended to the beginning.
 
 #### Performance toggles (Gradio)
 
