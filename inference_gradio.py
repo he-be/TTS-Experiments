@@ -601,11 +601,8 @@ def run_inference_segmented(
 
         all_segment_results.append(segment_audios)
 
-        # Concatenate all segments
-        if len(segment_audios) > 1:
-            concat_audio = concatenate_audio_segments(segment_audios, silence_sec=inter_segment_silence)
-        else:
-            concat_audio = segment_audios[0]
+        # Concatenate all segments (also trims leading/trailing silence and prepends 1s silence)
+        concat_audio = concatenate_audio_segments(segment_audios, silence_sec=inter_segment_silence)
 
         concatenated_results.append(concat_audio)
         print(f"[Info] Batch {batch_idx+1} complete: concatenated audio {concat_audio[1].shape[0]/concat_audio[0]:.2f}s")
