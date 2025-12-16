@@ -669,6 +669,14 @@ def build_demo(
                 value=False,
                 info="Split text by sentence delimiters and generate in parallel",
             )
+            inter_segment_silence_box = gr.Slider(
+                label="Inter-segment Silence / セグメント間の無音（秒）",
+                minimum=0.0,
+                maximum=2.0,
+                step=0.1,
+                value=inter_segment_silence,
+                info="Silence duration between segments when concatenating",
+            )
 
         with gr.Row():
             top_k_box = gr.Slider(label="top_k", minimum=0, maximum=100, step=1, value=30)
@@ -749,6 +757,7 @@ def build_demo(
             seed,
             batch_count,
             enable_segmentation,
+            inter_segment_silence_val,
         ):
             dur = None
             if str(target_duration).strip() not in {"", "None", "none"}:
@@ -775,7 +784,7 @@ def build_demo(
                     seed=seed_val,
                     resources=resources,
                     batch_count=batch_count,
-                    inter_segment_silence=inter_segment_silence,
+                    inter_segment_silence=inter_segment_silence_val,
                 )
 
                 outputs = []
@@ -861,6 +870,7 @@ def build_demo(
                 seed_box,
                 batch_count_box,
                 enable_segmentation_box,
+                inter_segment_silence_box,
             ],
             outputs=all_outputs,
         )
