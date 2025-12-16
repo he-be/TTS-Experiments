@@ -61,3 +61,4 @@
 - モデルに `inference_tts_batch_multi_text` がある場合は、**セグメントごとに異なるテキストを1つのバッチ入力**として `inference_tts_batch_multi_text(...)` を呼びます（`inference_gradio.py:516-536`）。
 - `inference_tts_batch_multi_text` が無い場合は、セグメントごとに `inference_one_sample(...)` を呼ぶ直列処理にフォールバックします（`inference_gradio.py:536-576`）。
 - `inference_tts_batch_multi_text` は、このリポジトリのHF wrapper に実装されており（`hf_export/modeling_t5gemma_voice.py`）、必要に応じて `inference_tts_batch` と同様にモデルへ自動パッチされます（`inference_gradio.py:116-122`）。
+- セグメント結合時は無音を挿入し、`--inter_segment_silence`（デフォルト `0.05` 秒）で長さを調整できます（`inference_gradio.py`）。

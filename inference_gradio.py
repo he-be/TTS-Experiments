@@ -358,7 +358,7 @@ def run_inference_segmented(
     cut_off_sec: int = 100,
     lang: Optional[str] = None,
     batch_count: int = 1,
-    inter_segment_silence: float = 0.15,
+    inter_segment_silence: float = 0.05,
 ) -> Tuple[list, list, list]:
     """
     Run segmented TTS inference: split text by sentences and generate each in parallel.
@@ -617,7 +617,14 @@ def run_inference_segmented(
 # Gradio UI
 # ---------------------------------------------------------------------------
 
-def build_demo(resources, server_port: int, share: bool, max_batch: int = 4, max_segments: int = 10):
+def build_demo(
+    resources,
+    server_port: int,
+    share: bool,
+    max_batch: int = 4,
+    max_segments: int = 10,
+    inter_segment_silence: float = 0.05,
+):
     description = (
         "Reference speech is optional. If provided without reference text, Whisper (large-v3-turbo) "
         "will auto-transcribe and use it as the prompt text.\n\n"
@@ -778,7 +785,7 @@ def build_demo(resources, server_port: int, share: bool, max_batch: int = 4, max
                     seed=seed_val,
                     resources=resources,
                     batch_count=batch_count,
-                    inter_segment_silence=0.15,
+                    inter_segment_silence=inter_segment_silence,
                 )
 
                 outputs = []
@@ -888,6 +895,12 @@ def main():
     parser.add_argument("--no_compile", action="store_true", help="Disable torch.compile (faster startup, slower inference)")
     parser.add_argument("--max_batch", type=int, default=4, help="Maximum batch count for parallel generation")
     parser.add_argument("--max_segments", type=int, default=10, help="Maximum number of segments to display in UI")
+    parser.add_argument(
+        "--inter_segment_silence",
+        type=float,
+        default=0.05,
+        help="Silence (seconds) inserted between sentence segments when segmentation is enabled",
+    )
     args = parser.parse_args()
 
     if args.low_vram:
@@ -905,7 +918,14 @@ def main():
         cpu_codec=args.cpu_codec,
         whisper_device=whisper_device,
     )
-    build_demo(resources=resources, server_port=args.port, share=args.share, max_batch=args.max_batch, max_segments=args.max_segments)
+    build_demo(
+        resources=resources,
+        server_port=args.port,
+        share=args.share,
+        max_batch=args.max_batch,
+        max_segments=args.max_segments,
+        inter_segment_silence=args.inter_segment_silence,
+    )
 
 
 if __name__ == "__main__":
