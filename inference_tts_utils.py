@@ -203,6 +203,9 @@ def concatenate_audio_segments(
     """
     Concatenate audio segments with silence gaps between them.
 
+    Before concatenation, leading/trailing near-silence is trimmed from each segment.
+    After concatenation, leading/trailing near-silence is trimmed from the full output.
+
     Args:
         segments: List of (sample_rate, waveform) tuples.
         silence_sec: Duration of silence between segments in seconds.
@@ -219,7 +222,28 @@ def concatenate_audio_segments(
     sample_rate = segments[0][0]
     silence_samples = int(silence_sec * sample_rate)
 
+    def _trim_leading_trailing_silence(wav: np.ndarray, *, threshold_db: float = -45.0) -> np.ndarray:
+        """
+        Trim leading and trailing near-silence based on a peak-relative threshold.
+
+        threshold_db is relative to the segment peak amplitude (e.g., -45 dB).
+        """
+        if wav.size == 0:
+            return wav
+
+        wav_abs = np.abs(wav.astype(np.float32, copy=False))
+        peak = float(wav_abs.max(initial=0.0))
+        if peak <= 0.0:
+            return wav[:0]
+
+        threshold = peak * (10.0 ** (threshold_db / 20.0))
+        idx = np.flatnonzero(wav_abs > threshold)
+        if idx.size == 0:
+            return wav[:0]
+        return wav[idx[0] : idx[-1] + 1]
+
     parts = []
+    trimmed_segments: List[np.ndarray] = []
     for i, (sr, wav) in enumerate(segments):
         if sr != sample_rate:
             raise ValueError(f"Sample rate mismatch: segment {i} has {sr}, expected {sample_rate}")
@@ -228,14 +252,23 @@ def concatenate_audio_segments(
         if wav.ndim > 1:
             wav = wav.squeeze()
 
+        wav = _trim_leading_trailing_silence(wav)
+        if wav.size > 0:
+            trimmed_segments.append(wav)
+
+    if not trimmed_segments:
+        return (sample_rate, np.zeros((0,), dtype=segments[0][1].dtype))
+
+    for i, wav in enumerate(trimmed_segments):
         parts.append(wav)
 
         # Add silence between segments (not after the last one)
-        if i < len(segments) - 1 and silence_samples > 0:
+        if i < len(trimmed_segments) - 1 and silence_samples > 0:
             silence = np.zeros(silence_samples, dtype=wav.dtype)
             parts.append(silence)
 
     concatenated = np.concatenate(parts)
+    concatenated = _trim_leading_trailing_silence(concatenated)
     return (sample_rate, concatenated)
 
 
