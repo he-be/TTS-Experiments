@@ -110,6 +110,12 @@ python inference_gradio.py \
 - `batch_count > 1` のとき、可能なら `inference_tts_batch` を使って1回の推論ループで複数サンプルを生成します（古いremote-codeチェックポイント向けに自動パッチも行います）。`Model lacks inference_tts_batch` が表示される場合は直列実行にフォールバックします。
 - 注意: バッチ生成は主にスループット改善（1リクエストで複数サンプル生成）向けで、1サンプルあたりのレイテンシ短縮を保証するものではありません。
 
+#### 文分割（セグメント並列）
+
+- UIの `Enable Sentence Segmentation / 文分割を有効化` をONにすると、`Target Text` を文末区切り（日本語/英語の句読点＋改行）で分割して生成します。
+- モデルに `inference_tts_batch_multi_text` がある場合（または古いremote-codeチェックポイント向けに自動パッチできる場合）、セグメントを並列生成します。無い場合はセグメントごとの直列生成にフォールバックします。
+- `--max_segments` はUIに表示するセグメント数の上限（表示のみ）です。`batch_count > 1` のとき、個別セグメント音声は先頭バッチのみ表示され、連結音声は各バッチ分が出力されます。
+
 #### 性能関連の切り替え（Gradio）
 
 - `T5GEMMA_DETERMINISTIC=1`: cuDNNの決定論設定を有効化（通常は遅くなります）。デフォルトは速度優先です。

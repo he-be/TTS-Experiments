@@ -112,6 +112,12 @@ python inference_gradio.py \
 - When `batch_count > 1`, the demo will use `inference_tts_batch` if available (or auto-patch it for some older remote-code checkpoints). If you still see `Model lacks inference_tts_batch`, it will fall back to sequential generation.
 - Note: batch generation primarily improves throughput (multiple samples per request); it does not guarantee lower latency per sample.
 
+#### Sentence segmentation (parallel segments)
+
+- In the UI, enable `Enable Sentence Segmentation / 文分割を有効化` to split `Target Text` by sentence delimiters (Japanese/English punctuation + newlines).
+- If the model has `inference_tts_batch_multi_text` (or can be auto-patched for some older remote-code checkpoints), segments are generated in parallel; otherwise it falls back to sequential per-segment generation.
+- `--max_segments` controls how many segments are shown in the UI (display limit only). When `batch_count > 1`, only the first batch’s per-segment audio is displayed; concatenated outputs are provided for each batch.
+
 #### Performance toggles (Gradio)
 
 - `T5GEMMA_DETERMINISTIC=1`: enable deterministic cuDNN settings (usually slower). Default is speed-oriented.

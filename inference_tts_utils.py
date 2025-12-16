@@ -5,7 +5,7 @@ import pickle
 import random
 import re
 import time
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -128,6 +128,115 @@ def normalize_text_with_lang(text: str, lang: Optional[str]) -> Tuple[str, Optio
     if resolved_lang and resolved_lang.startswith("ja"):
         return _normalize_japanese_text(text), resolved_lang
     return text, resolved_lang
+
+
+# ==== Sentence Segmentation Utilities ====
+
+# Default delimiters for sentence segmentation (Japanese + English + newlines)
+_SENTENCE_DELIMITERS = r"[。！？!?\.]+|\n+"
+
+
+def segment_text_by_sentences(
+    text: str,
+    delimiters: str = _SENTENCE_DELIMITERS,
+    min_length: int = 1,
+    preserve_delimiter: bool = True,
+) -> List[str]:
+    """
+    Split text into sentences by delimiters.
+
+    Args:
+        text: Input text to segment.
+        delimiters: Regex pattern for sentence-ending punctuation.
+        min_length: Minimum characters for a valid segment (after stripping).
+        preserve_delimiter: Keep the delimiter at end of each segment.
+
+    Returns:
+        List of sentence segments. If no delimiters found, returns [text].
+    """
+    if not text or not text.strip():
+        return []
+
+    text = text.strip()
+
+    if preserve_delimiter:
+        # Split using lookbehind to keep delimiter with the segment
+        # This splits AFTER the delimiter pattern
+        parts = re.split(f"({delimiters})", text)
+
+        # Merge delimiter back to previous segment
+        segments = []
+        current = ""
+        for i, part in enumerate(parts):
+            if not part:
+                continue
+            if re.fullmatch(delimiters, part):
+                # This is a delimiter, append to current segment
+                current += part
+            else:
+                # This is text content
+                if current:
+                    segments.append(current)
+                current = part
+
+        # Don't forget the last segment
+        if current:
+            segments.append(current)
+    else:
+        # Simple split, delimiters are removed
+        segments = re.split(delimiters, text)
+
+    # Filter out empty or too-short segments
+    segments = [s.strip() for s in segments if s and len(s.strip()) >= min_length]
+
+    # If no valid segments, return original text
+    if not segments:
+        return [text]
+
+    return segments
+
+
+def concatenate_audio_segments(
+    segments: List[Tuple[int, np.ndarray]],
+    silence_sec: float = 0.15,
+) -> Tuple[int, np.ndarray]:
+    """
+    Concatenate audio segments with silence gaps between them.
+
+    Args:
+        segments: List of (sample_rate, waveform) tuples.
+        silence_sec: Duration of silence between segments in seconds.
+
+    Returns:
+        (sample_rate, concatenated_waveform) tuple.
+
+    Raises:
+        ValueError: If segments list is empty or sample rates don't match.
+    """
+    if not segments:
+        raise ValueError("No segments to concatenate")
+
+    sample_rate = segments[0][0]
+    silence_samples = int(silence_sec * sample_rate)
+
+    parts = []
+    for i, (sr, wav) in enumerate(segments):
+        if sr != sample_rate:
+            raise ValueError(f"Sample rate mismatch: segment {i} has {sr}, expected {sample_rate}")
+
+        # Ensure waveform is 1D
+        if wav.ndim > 1:
+            wav = wav.squeeze()
+
+        parts.append(wav)
+
+        # Add silence between segments (not after the last one)
+        if i < len(segments) - 1 and silence_samples > 0:
+            silence = np.zeros(silence_samples, dtype=wav.dtype)
+            parts.append(silence)
+
+    concatenated = np.concatenate(parts)
+    return (sample_rate, concatenated)
 
 
 # this script only works for the musicgen architecture
