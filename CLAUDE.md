@@ -122,6 +122,7 @@ For low VRAM environments:
 - `--cpu_whisper`: Run Whisper on CPU (~5GB savings)
 - `--low_vram`: Preset enabling both + disabling torch.compile
 - `--t5_gradient_checkpointing 1`: For training
+- Whisper model is automatically unloaded after transcription to free ~3GB VRAM
 
 ## Performance Tuning
 

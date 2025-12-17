@@ -622,6 +622,16 @@ def get_whisper_model(device: str = "cpu"):
     return model, processor
 
 
+def unload_whisper_model():
+    """Unload Whisper model from memory to free VRAM."""
+    get_whisper_model.cache_clear()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+    print("[Info] Whisper model unloaded from memory.")
+
+
 def transcribe_audio(audio_path: str, device: str = "cpu") -> str:
     """Transcribe audio file using transformers Whisper (no ffmpeg required)."""
     model, processor = get_whisper_model(device)

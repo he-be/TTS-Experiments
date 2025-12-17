@@ -24,6 +24,7 @@ from inference_tts_utils import (
     inference_one_sample,
     normalize_text_with_lang,
     transcribe_audio,
+    unload_whisper_model,
     segment_text_by_sentences,
     concatenate_audio_segments,
 )
@@ -217,6 +218,7 @@ def run_inference(
         print("[Info] No reference text; transcribing reference speech with Whisper.")
         prefix_transcript = transcribe_audio(reference_speech, resources["whisper_device"])
         print(f"[Info] Whisper transcription: {prefix_transcript}")
+        unload_whisper_model()
     else:
         prefix_transcript = reference_text
 
@@ -396,6 +398,7 @@ def run_inference_segmented(
         print("[Info] No reference text; transcribing reference speech with Whisper (large-v3-turbo).")
         prefix_transcript = transcribe_audio(reference_speech, resources["whisper_device"])
         print(f"[Info] Whisper transcription: {prefix_transcript}")
+        unload_whisper_model()
     else:
         prefix_transcript = reference_text
 
