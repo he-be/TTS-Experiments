@@ -138,19 +138,199 @@ def normalize_text_with_lang(text: str, lang: Optional[str]) -> Tuple[str, Optio
 _SENTENCE_DELIMITERS = r"[。！？!?\.]+|\n+"
 
 
+
+def split_into_adaptive_chunks(
+    text: str,
+    target_size: int = 550,
+    delimiters: str = _SENTENCE_DELIMITERS,
+    min_size: int = 400,
+    max_size: int = 600,
+) -> List[str]:
+    """
+    Split text into adaptive chunks around target_size characters.
+
+    Tries to split at sentence delimiters to create natural chunks.
+    Each chunk will be between min_size and max_size characters.
+
+    Args:
+        text: Input text to chunk.
+        target_size: Target chunk size in characters.
+        delimiters: Regex pattern for sentence-ending punctuation.
+        min_size: Minimum chunk size.
+        max_size: Maximum chunk size.
+
+    Returns:
+        List of text chunks.
+    """
+    if not text or not text.strip():
+        return []
+
+    text = text.strip()
+
+    # If text is shorter than max_size, return as single chunk
+    if len(text) <= max_size:
+        return [text]
+
+    # For chunking, use only punctuation delimiters (not newlines)
+    # This preserves newlines within chunks for later segmentation
+    punct_delimiters = r"[。！？!?\.]+"
+
+    # Split by sentences first (using only punctuation, preserving newlines)
+    sentences = segment_text_by_sentences(text, delimiters=punct_delimiters, min_length=1, preserve_delimiter=True)
+    if not sentences:
+        # Fallback: hard split by max_size
+        return [text[i:i+max_size] for i in range(0, len(text), max_size)]
+
+    chunks = []
+    current_chunk = ""
+
+    for sentence in sentences:
+        # If adding this sentence would exceed max_size
+        if current_chunk and len(current_chunk) + len(sentence) > max_size:
+            # Save current chunk if it meets min_size
+            if len(current_chunk) >= min_size:
+                chunks.append(current_chunk)
+                current_chunk = sentence
+            else:
+                # Current chunk is too small, but adding would exceed max
+                # Force split: save current + start new with this sentence
+                chunks.append(current_chunk)
+                current_chunk = sentence
+        # If current chunk + sentence is around target or doesn't exceed max
+        elif current_chunk and len(current_chunk) + len(sentence) >= target_size:
+            # Good size, save it
+            chunks.append(current_chunk)
+            current_chunk = sentence
+        else:
+            # Keep accumulating
+            current_chunk += sentence
+
+    # Don't forget the last chunk
+    if current_chunk:
+        # If last chunk is too small, merge with previous
+        if chunks and len(current_chunk) < min_size:
+            chunks[-1] += current_chunk
+        else:
+            chunks.append(current_chunk)
+
+    return chunks
+
+
+def merge_short_sentences(
+    sentences: List[str],
+    min_length: int = 13,
+    max_length: int = 80,
+) -> List[str]:
+    """
+    Merge short sentences with adjacent ones to ensure min/max length constraints.
+
+    Key rules:
+    - Sentences >= min_length (13 chars) should remain as separate segments
+    - Only merge sentences < min_length together
+    - Exception: merge >= min_length sentence with buffer only if buffer < min_length
+
+    Args:
+        sentences: List of sentence strings.
+        min_length: Minimum sentence length in characters (default: 13).
+        max_length: Maximum sentence length in characters.
+
+    Returns:
+        List of merged sentences.
+    """
+    if not sentences:
+        return []
+
+    merged = []
+    buffer = ""
+
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+
+        # If this sentence alone exceeds max_length, hard split it
+        if len(sentence) > max_length:
+            # Flush buffer first
+            if buffer:
+                merged.append(buffer)
+                buffer = ""
+
+            # Hard split long sentence
+            for i in range(0, len(sentence), max_length):
+                chunk = sentence[i:i+max_length]
+                merged.append(chunk)
+            continue
+
+        # Case 1: Sentence is >= min_length (13 chars)
+        if len(sentence) >= min_length:
+            # Check if there's a short buffer (< min_length) that needs merging
+            if buffer and len(buffer) < min_length:
+                # Try to merge buffer with this sentence
+                if len(buffer) + len(sentence) <= max_length:
+                    # Can merge - this is "necessary" to fix the short buffer
+                    merged.append(buffer + sentence)
+                    buffer = ""
+                else:
+                    # Can't merge without exceeding max - output buffer as-is
+                    merged.append(buffer)
+                    merged.append(sentence)
+                    buffer = ""
+            else:
+                # Buffer is empty or >= min_length
+                # Output buffer first if it exists
+                if buffer:
+                    merged.append(buffer)
+                    buffer = ""
+                # Output this sentence as a separate segment
+                merged.append(sentence)
+
+        # Case 2: Sentence is < min_length (short sentence)
+        else:
+            # Accumulate in buffer
+            if not buffer:
+                buffer = sentence
+            elif len(buffer) + len(sentence) <= max_length:
+                # Can add to buffer
+                buffer += sentence
+                # If buffer now meets min_length, output it (adaptive segmentation)
+                if len(buffer) >= min_length:
+                    merged.append(buffer)
+                    buffer = ""
+            else:
+                # Can't add without exceeding max - flush buffer first
+                merged.append(buffer)
+                buffer = sentence
+
+    # Handle remaining buffer
+    if buffer:
+        # If buffer is still short, try to merge with last segment
+        if merged and len(buffer) < min_length:
+            if len(merged[-1]) + len(buffer) <= max_length:
+                merged[-1] += buffer
+            else:
+                # Can't merge - output as-is
+                merged.append(buffer)
+        else:
+            merged.append(buffer)
+
+    return merged
+
+
 def segment_text_by_sentences(
     text: str,
     delimiters: str = _SENTENCE_DELIMITERS,
-    min_length: int = 1,
+    min_length: int = 13,
+    max_length: int = 80,
     preserve_delimiter: bool = True,
 ) -> List[str]:
     """
-    Split text into sentences by delimiters.
+    Split text into sentences by delimiters, then merge short sentences.
 
     Args:
         text: Input text to segment.
         delimiters: Regex pattern for sentence-ending punctuation.
-        min_length: Minimum characters for a valid segment (after stripping).
+        min_length: Minimum characters for a valid segment (after merging).
+        max_length: Maximum characters for a segment (enforced during merging).
         preserve_delimiter: Keep the delimiter at end of each segment.
 
     Returns:
@@ -188,12 +368,21 @@ def segment_text_by_sentences(
         # Simple split, delimiters are removed
         segments = re.split(delimiters, text)
 
-    # Filter out empty or too-short segments
-    segments = [s.strip() for s in segments if s and len(s.strip()) >= min_length]
+    # Filter out empty segments
+    if preserve_delimiter:
+        # When preserving delimiters, keep them intact (don't strip)
+        # But remove truly empty segments
+        segments = [s for s in segments if s and s.strip()]
+    else:
+        # When delimiters are removed, strip whitespace
+        segments = [s.strip() for s in segments if s and s.strip()]
 
     # If no valid segments, return original text
     if not segments:
         return [text]
+
+    # Merge short sentences to ensure min/max length constraints
+    segments = merge_short_sentences(segments, min_length=min_length, max_length=max_length)
 
     return segments
 
