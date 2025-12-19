@@ -40,6 +40,32 @@ except ImportError:  # pragma: no cover
 # Helpers
 # ---------------------------------------------------------------------------
 
+def adaptive_duration_scale(estimated_duration: float, scale_factor: float) -> float:
+    """
+    Apply adaptive scaling based on estimated duration.
+
+    - Long durations (>= 20s): Apply scale_factor as-is
+    - Short durations (<= 5s): Apply minimal scaling (close to 1.0)
+    - Medium durations (5-20s): Linear interpolation
+
+    This prevents cutting off audio for short segments while allowing
+    aggressive scaling for long segments.
+    """
+    if scale_factor == 1.0:
+        return 1.0
+
+    if estimated_duration >= 20.0:
+        # Long duration: apply full scale
+        return scale_factor
+    elif estimated_duration <= 5.0:
+        # Short duration: apply minimal scale (10% of requested)
+        return 1.0 + (scale_factor - 1.0) * 0.1
+    else:
+        # Medium duration: linear interpolation
+        ratio = (estimated_duration - 5.0) / (20.0 - 5.0)
+        return 1.0 + (scale_factor - 1.0) * ratio
+
+
 def seed_everything(seed: Optional[int], *, deterministic: bool = False) -> int:
     """
     Seed all RNGs. If seed is None, draw a fresh random seed and return it.
@@ -185,6 +211,7 @@ def run_inference(
     cut_off_sec: int = 100,
     lang: Optional[str] = None,
     batch_count: int = 1,
+    duration_scale: float = 1.0,
 ) -> list:
     """
     Run TTS and return a list of (sample_rate, waveform) tuples for Gradio playback.
@@ -229,16 +256,28 @@ def run_inference(
         prefix_transcript, _ = normalize_text_with_lang(prefix_transcript, lang_code)
 
     if target_duration is None:
-        target_generation_length = estimate_duration(
+        estimated_length = estimate_duration(
             target_text=target_text,
             reference_speech=None if no_reference_audio else reference_speech,
             reference_transcript=None if no_reference_audio else prefix_transcript,
             target_lang=lang_code,
             reference_lang=lang_code,
         )
-        print(f"[Info] target_duration not provided, estimated as {target_generation_length:.2f} seconds.")
+        print(f"[Info] target_duration not provided, estimated as {estimated_length:.2f} seconds.")
+
+        # Apply adaptive duration scale
+        if duration_scale != 1.0:
+            actual_scale = adaptive_duration_scale(estimated_length, duration_scale)
+            target_generation_length = estimated_length * actual_scale
+            print(f"[Info] Applied adaptive duration scale {actual_scale:.3f}x (requested {duration_scale:.2f}x for {estimated_length:.2f}s) -> {target_generation_length:.2f} seconds.")
+        else:
+            target_generation_length = estimated_length
     else:
+        # User specified explicit duration, apply scale directly
         target_generation_length = float(target_duration)
+        if duration_scale != 1.0:
+            target_generation_length *= duration_scale
+            print(f"[Info] Applied duration scale {duration_scale:.2f}x to user-specified duration -> {target_generation_length:.2f} seconds.")
 
     if not no_reference_audio:
         info = get_audio_info(reference_speech)
@@ -356,6 +395,7 @@ def run_inference_segmented(
     lang: Optional[str] = None,
     batch_count: int = 1,
     inter_segment_silence: float = 0.05,
+    duration_scale: float = 1.0,
 ) -> Tuple[list, list, list]:
     """
     Run segmented TTS inference: split text by sentences and generate each in parallel.
@@ -425,7 +465,17 @@ def run_inference_segmented(
             reference_lang=lang_code,
         )
         segment_durations.append(dur)
-        print(f"[Info] Segment duration estimate: {dur:.2f}s for '{seg[:30]}...'")
+        print(f"[Info] Segment duration estimate: {dur:.2f}s for '{seg[:50]}...'")
+
+    # Apply adaptive duration scale to each segment individually
+    if duration_scale != 1.0:
+        scaled_durations = []
+        for i, dur in enumerate(segment_durations):
+            actual_scale = adaptive_duration_scale(dur, duration_scale)
+            scaled_dur = dur * actual_scale
+            scaled_durations.append(scaled_dur)
+            print(f"[Info] Segment {i+1}: adaptive scale {actual_scale:.3f}x (requested {duration_scale:.2f}x for {dur:.2f}s) -> {scaled_dur:.2f}s")
+        segment_durations = scaled_durations
 
     # Prepare reference audio
     if not no_reference_audio:
@@ -651,6 +701,14 @@ def build_demo(
                 value="",
                 placeholder="Leave blank for auto estimate",
             )
+            duration_scale_box = gr.Slider(
+                label="Duration Scale / 時間スケール",
+                minimum=0.5,
+                maximum=1.5,
+                step=0.05,
+                value=1.0,
+                info="Adaptive scaling: affects long segments more (>20s), short segments less (<5s) to prevent cutoff",
+            )
             seed_box = gr.Textbox(
                 label="Random Seed (optional)",
                 value="",
@@ -753,6 +811,7 @@ def build_demo(
             reference_text,
             target_text,
             target_duration,
+            duration_scale,
             top_k,
             top_p,
             min_p,
@@ -796,6 +855,7 @@ def build_demo(
                     resources=resources,
                     batch_count=batch_count,
                     inter_segment_silence=inter_segment_silence_val,
+                    duration_scale=duration_scale,
                 )
 
                 outputs = []
@@ -841,6 +901,7 @@ def build_demo(
                     seed=seed_val,
                     resources=resources,
                     batch_count=batch_count,
+                    duration_scale=duration_scale,
                 )
 
                 outputs = []
@@ -874,6 +935,7 @@ def build_demo(
                 reference_text_box,
                 target_text_box,
                 target_duration_box,
+                duration_scale_box,
                 top_k_box,
                 top_p_box,
                 min_p_box,
