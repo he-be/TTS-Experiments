@@ -207,9 +207,19 @@ def split_into_adaptive_chunks(
 
     # Don't forget the last chunk
     if current_chunk:
-        # If last chunk is too small, merge with previous
-        if chunks and len(current_chunk) < min_size:
-            chunks[-1] += current_chunk
+        # If current chunk itself exceeds max_size, hard split it
+        if len(current_chunk) > max_size:
+            # Hard split into max_size chunks
+            for i in range(0, len(current_chunk), max_size):
+                chunks.append(current_chunk[i:i+max_size])
+        # If last chunk is too small, try to merge with previous
+        elif chunks and len(current_chunk) < min_size:
+            # Only merge if it doesn't exceed max_size
+            if len(chunks[-1]) + len(current_chunk) <= max_size:
+                chunks[-1] += current_chunk
+            else:
+                # Can't merge - must keep as separate chunk even if small
+                chunks.append(current_chunk)
         else:
             chunks.append(current_chunk)
 
