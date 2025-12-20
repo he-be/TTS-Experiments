@@ -514,8 +514,11 @@ def run_inference_segmented(
     concatenated_results = []
     all_chunk_results = []
     all_saved_files = []
+    
+    # Store detailed segments for all chunks (first batch)
+    all_segments_details = []
 
-    # Store first chunk's segments for UI display
+    # Store first chunk's segments for UI display (Legacy, can remove or keep empty)
     first_chunk_segment_results = []
     first_chunk_segment_texts = []
 
@@ -672,10 +675,13 @@ def run_inference_segmented(
                 waveform = gen_tensor.numpy()
                 segment_audios.append((codec_audio_sr, waveform))
 
-            # Store first chunk's segments for UI
-            if chunk_idx == 0 and batch_idx == 0:
-                first_chunk_segment_results = segment_audios
-                first_chunk_segment_texts = segments
+            # Store segments for UI (for the first batch only)
+            if batch_idx == 0:
+                # Zip texts and audios for this chunk
+                chunk_seg_details = []
+                for txt, aud in zip(segments, segment_audios):
+                    chunk_seg_details.append((txt, aud))
+                all_segments_details.append(chunk_seg_details)
 
             # Concatenate segments within this chunk
             chunk_audio = concatenate_audio_segments(segment_audios, silence_sec=inter_segment_silence)
@@ -715,6 +721,7 @@ def run_inference_segmented(
         [first_chunk_segment_results] if first_chunk_segment_results else [],
         first_chunk_segment_texts,
         all_saved_files,
+        all_segments_details,
     )
 
 
@@ -740,6 +747,17 @@ def build_demo(
     with gr.Blocks() as demo:
         gr.Markdown("## T5Gemma-TTS (HF)")
         gr.Markdown(description)
+
+        # State to store hierarchial data:
+        # List of dicts (chunks), each dict:
+        # {
+        #   "full_text": str,
+        #   "full_audio": (sr, wav),
+        #   "segments": [
+        #       { "text": str, "audio": (sr, wav), "candidates": [] }, ...
+        #   ]
+        # }
+        segments_state = gr.State([])
 
         with gr.Row():
             reference_speech_input = gr.Audio(
@@ -830,26 +848,93 @@ def build_demo(
         )
 
         # Chunk outputs in accordion
-        chunk_accordion = gr.Accordion("Chunks / チャンク別", open=False, visible=False)
-        chunk_text_outputs = []
-        chunk_audio_outputs = []
-        max_chunks = 10
+        chunk_accordion = gr.Accordion("Chunks (Edit Segments)", open=True, visible=False)
+        
+        max_chunks = 5
+        max_segments_per_chunk = 32
+        
+        # Flattened list of all segment UI dicts, keyed by (chunk_idx, seg_idx)
+        all_segment_ui = [] 
+
+        # We also need UI for the chunks themselves (read-only text + audio)
+        chunk_ui_elements = [] 
+
         with chunk_accordion:
             for i in range(max_chunks):
-                with gr.Row():
-                    text_out = gr.Textbox(
-                        label=f"Chunk {i+1} Text",
-                        interactive=False,
-                        visible=False,
-                    )
-                    audio_out = gr.Audio(
-                        label=f"Chunk {i+1} Audio (Batch 1)",
-                        type="numpy",
-                        interactive=False,
-                        visible=False,
-                    )
-                chunk_text_outputs.append(text_out)
-                chunk_audio_outputs.append(audio_out)
+                with gr.Group(visible=False) as chunk_group:
+                    gr.Markdown(f"### Chunk {i+1}")
+                    with gr.Row():
+                        chunk_audio_player = gr.Audio(
+                            label=f"Chunk {i+1} Audio",
+                            type="numpy",
+                            interactive=False,
+                        )
+                        chunk_text_display = gr.Textbox(
+                            label=f"Chunk {i+1} Full Text",
+                            interactive=False,
+                            lines=2,
+                        )
+                    
+                    with gr.Accordion(f"Edit Segments (Chunk {i+1})", open=False):
+                        segment_uis_for_this_chunk = []
+                        for j in range(max_segments_per_chunk):
+                            with gr.Group(visible=False) as seg_group:
+                                with gr.Row():
+                                    seg_text_input = gr.Textbox(
+                                        label=f"Seg {j+1}", 
+                                        interactive=True, 
+                                        scale=3,
+                                        lines=1
+                                    )
+                                    seg_audio_player = gr.Audio(
+                                        label=f"Audio",
+                                        type="numpy", 
+                                        interactive=False,
+                                        container=False,
+                                        scale=1,
+                                    )
+                                    seg_regen_btn = gr.Button("Regen", size="sm", scale=0)
+                                
+                                # Candidates for this segment
+                                with gr.Group(visible=False) as cand_group:
+                                    cand_audios = []
+                                    with gr.Row():
+                                        for c in range(8):
+                                            ca = gr.Audio(
+                                                label=f"C{c+1}",
+                                                type="numpy",
+                                                interactive=False,
+                                                container=True,
+                                                min_width=100,
+                                            )
+                                            cand_audios.append(ca)
+                                    
+                                    cand_radio = gr.Radio(
+                                        choices=[f"C{c+1}" for c in range(8)],
+                                        label="Select",
+                                        type="index",
+                                    )
+                                    cand_update_btn = gr.Button("Update Segment", size="sm", variant="primary")
+
+                                segment_uis_for_this_chunk.append({
+                                    "group": seg_group,
+                                    "text": seg_text_input,
+                                    "audio": seg_audio_player,
+                                    "regen_btn": seg_regen_btn,
+                                    "cand_group": cand_group,
+                                    "cand_audios": cand_audios,
+                                    "radio": cand_radio,
+                                    "update_btn": cand_update_btn,
+                                    "chunk_idx": i,
+                                    "seg_idx": j,
+                                })
+                        all_segment_ui.append(segment_uis_for_this_chunk)
+                    
+                    chunk_ui_elements.append({
+                        "group": chunk_group,
+                        "audio": chunk_audio_player,
+                        "text": chunk_text_display,
+                    })
 
         # Create multiple audio outputs for batch generation (non-segmented mode)
         output_audios = []
@@ -864,7 +949,6 @@ def build_demo(
                 output_audios.append(audio)
 
         def toggle_segmentation_ui(enabled):
-            """Toggle visibility of segmentation-related UI elements."""
             return [
                 gr.update(visible=enabled),  # concat_row
                 gr.update(visible=not enabled),  # batch_row
@@ -877,6 +961,150 @@ def build_demo(
             inputs=[enable_segmentation_box],
             outputs=[concat_row, batch_row, saved_files_box, chunk_accordion],
         )
+
+        def regenerate_segment(
+            chunk_idx,
+            seg_idx,
+            text,
+            current_state,
+            reference_speech,
+            reference_text,
+            duration_scale,
+            top_k,
+            top_p,
+            min_p,
+            temperature,
+            seed,
+        ):
+            print(f"[Info] Regenerating Chunk {chunk_idx+1}-Seg {seg_idx+1}: {text}")
+            seed_val = None
+            if str(seed).strip() not in {"", "None", "none"}:
+                seed_val = int(float(seed))
+            
+            # Run inference for this segment text as a single sample (batch 8 candidates)
+            results = run_inference(
+                reference_speech=reference_speech,
+                reference_text=reference_text,
+                target_text=text,
+                target_duration=None, 
+                top_k=top_k,
+                top_p=top_p,
+                min_p=min_p,
+                temperature=temperature,
+                seed=seed_val,
+                resources=resources,
+                batch_count=8, 
+                duration_scale=duration_scale,
+            )
+            
+            # Update state with new text and candidates
+            new_state = list(current_state)
+            if chunk_idx < len(new_state):
+                segs = new_state[chunk_idx]["segments"]
+                if seg_idx < len(segs):
+                    segs[seg_idx]["text"] = text
+                    segs[seg_idx]["candidates"] = results
+            
+            # Return UI updates for candidates
+            outputs = [gr.update(visible=True)] # show cand_group
+            for i in range(8):
+                if i < len(results):
+                    outputs.append(gr.update(value=results[i], visible=True))
+                else:
+                    outputs.append(gr.update(value=None, visible=False))
+            outputs.append(gr.update(value=None)) # reset radio
+            outputs.append(new_state)
+            return outputs
+
+        def update_segment(
+            chunk_idx,
+            seg_idx,
+            selected_idx,
+            current_state,
+            inter_silence,
+        ):
+            if selected_idx is None:
+                return [gr.update(), gr.update(), gr.update(), gr.update(), current_state]
+
+            new_state = list(current_state)
+            from inference_tts_utils import concatenate_audio_segments
+
+            # 1. Update Segment Audio
+            if chunk_idx < len(new_state):
+                segs = new_state[chunk_idx]["segments"]
+                if seg_idx < len(segs):
+                    candidates = segs[seg_idx].get("candidates", [])
+                    if selected_idx < len(candidates):
+                        segs[seg_idx]["audio"] = candidates[selected_idx]
+            
+            # 2. Stitch Segments -> Chunk Audio
+            chunk_data = new_state[chunk_idx]
+            seg_audios = [s["audio"] for s in chunk_data["segments"] if s.get("audio") is not None]
+            
+            updated_chunk_audio = None
+            if seg_audios:
+                # Use smaller silence for intra-chunk segments (hardcoded 0.05s) or use slider?
+                # Using 0.05s as default for segment stitching to keep flow natural
+                updated_chunk_audio = concatenate_audio_segments(seg_audios, silence_sec=0.05)
+                chunk_data["full_audio"] = updated_chunk_audio
+            
+            # 3. Stitch Chunks -> Full Audio
+            all_chunk_audios = [c["full_audio"] for c in new_state if c.get("full_audio") is not None]
+            updated_full_audio = None
+            if all_chunk_audios:
+                updated_full_audio = concatenate_audio_segments(all_chunk_audios, silence_sec=inter_silence)
+
+            return [
+                gr.update(value=new_state[chunk_idx]["segments"][seg_idx]["audio"]), # Segment Player
+                gr.update(visible=False), # Hide Candidates
+                gr.update(value=updated_chunk_audio), # Chunk Player
+                gr.update(value=updated_full_audio), # Full Player
+                new_state
+            ]
+
+        # Register Event Handlers
+        for chunk_i in range(max_chunks):
+            for seg_j in range(max_segments_per_chunk):
+                ui = all_segment_ui[chunk_i][seg_j]
+                
+                # Regen
+                ui["regen_btn"].click(
+                    fn=regenerate_segment,
+                    inputs=[
+                        gr.Number(value=chunk_i, visible=False),
+                        gr.Number(value=seg_j, visible=False),
+                        ui["text"],
+                        segments_state,
+                        reference_speech_input,
+                        reference_text_box,
+                        duration_scale_box,
+                        top_k_box,
+                        top_p_box,
+                        min_p_box,
+                        temperature_box,
+                        seed_box,
+                    ],
+                    outputs=[ui["cand_group"]] + ui["cand_audios"] + [ui["radio"], segments_state],
+                )
+
+                # Update
+                ui["update_btn"].click(
+                    fn=update_segment,
+                    inputs=[
+                        gr.Number(value=chunk_i, visible=False),
+                        gr.Number(value=seg_j, visible=False),
+                        ui["radio"],
+                        segments_state,
+                        inter_segment_silence_box,
+                    ],
+                    outputs=[
+                        ui["audio"],
+                        ui["cand_group"],
+                        chunk_ui_elements[chunk_i]["audio"],
+                        concatenated_audio_outputs[0],
+                        segments_state
+                    ]
+                )
 
         def gradio_inference(
             reference_speech,
@@ -898,23 +1126,24 @@ def build_demo(
                 try:
                     dur = float(target_duration)
                 except ValueError:
-                    print(f"[Warning] Invalid duration value '{target_duration}', using auto-estimate")
+                    print(f"[Warning] Invalid duration value, using auto-estimate")
             seed_val = None
             if str(seed).strip() not in {"", "None", "none"}:
                 seed_val = int(float(seed))
             batch_count = int(batch_count)
 
-            # Check if segmentation should be used (auto-disable for single sentence)
             use_segmentation = enable_segmentation
-            if enable_segmentation:
-                segments = segment_text_by_sentences(target_text)
-                if len(segments) <= 1:
-                    print("[Info] Only 1 segment detected, using non-segmented inference.")
-                    use_segmentation = False
-
+            
             if use_segmentation:
-                # Segmented inference
-                concat_results, chunk_results, chunk_texts, segment_results, segment_texts, saved_files = run_inference_segmented(
+                # Need detailed segment info from run_inference_segmented
+                # NOTE: run_inference_segmented currently returns:
+                # (concatenated_results, chunk_results, chunk_texts, segment_results, segment_texts, saved_files)
+                # It does NOT return the necessary granular details for ALL chunks. 
+                # We will need to update `run_inference_segmented` to return `all_segments_details`.
+                # For now, let's assume it returns a 7th element `all_detailed_segments`.
+                
+                # Mocking the call structure for now - we will update the backend function next.
+                res = run_inference_segmented(
                     reference_speech=reference_speech,
                     reference_text=reference_text,
                     target_text=target_text,
@@ -929,45 +1158,96 @@ def build_demo(
                     inter_segment_silence=inter_segment_silence_val,
                     duration_scale=duration_scale,
                 )
+                
+                # Unpack assuming 7 values or handle partial
+                if len(res) == 7:
+                    concat_results, chunk_results, chunk_texts, segment_results, segment_texts, saved_files, all_detailed_segments = res
+                else:
+                    # Fallback if function not updated yet
+                    concat_results, chunk_results, chunk_texts, segment_results, segment_texts, saved_files = res
+                    all_detailed_segments = []
 
                 outputs = []
 
-                # Concatenated audio outputs
+                # 1. Main Concatenated Audio
                 for i in range(max_batch):
                     if i < len(concat_results):
-                        sr, wav = concat_results[i]
-                        outputs.append(gr.update(value=(sr, wav), visible=True))
+                        outputs.append(gr.update(value=concat_results[i], visible=True))
                     else:
                         outputs.append(gr.update(value=None, visible=False))
 
-                # Saved files display
-                if saved_files:
-                    files_text = "\n".join(saved_files)
-                    outputs.append(gr.update(value=files_text, visible=True))
-                else:
-                    outputs.append(gr.update(value="", visible=False))
+                # 2. Saved Files
+                files_text = "\n".join(saved_files) if saved_files else ""
+                outputs.append(gr.update(value=files_text, visible=bool(saved_files)))
 
-                # Chunk outputs (use first batch's chunks)
-                first_batch_chunks = chunk_results[0] if chunk_results else []
+                # 3. Build Initial State
+                new_state = []
+                for i in range(len(chunk_texts)):
+                    chunk_text = chunk_texts[i]
+                    chunk_audio = chunk_results[0][i] if (chunk_results and i < len(chunk_results[0])) else None
+                    
+                    segs_data = []
+                    # Check if we have detailed segments
+                    if i < len(all_detailed_segments):
+                        for seg_txt, seg_aud in all_detailed_segments[i]:
+                            segs_data.append({
+                                "text": seg_txt,
+                                "audio": seg_aud,
+                                "candidates": []
+                            })
+                    
+                    new_state.append({
+                        "full_text": chunk_text,
+                        "full_audio": chunk_audio,
+                        "segments": segs_data
+                    })
+
+                # 4. Populate UI
                 for i in range(max_chunks):
-                    if i < len(chunk_texts):
-                        outputs.append(gr.update(value=chunk_texts[i], visible=True))
-                        if i < len(first_batch_chunks):
-                            sr, wav = first_batch_chunks[i]
-                            outputs.append(gr.update(value=(sr, wav), visible=True))
-                        else:
-                            outputs.append(gr.update(value=None, visible=False))
+                    if i < len(new_state):
+                        cdata = new_state[i]
+                        outputs.append(gr.update(visible=True)) # Group
+                        outputs.append(gr.update(value=cdata["full_audio"])) # Chunk Audio
+                        outputs.append(gr.update(value=cdata["full_text"])) # Chunk Text
+                        
+                        segs = cdata["segments"]
+                        for j in range(max_segments_per_chunk):
+                            if j < len(segs):
+                                sdata = segs[j]
+                                outputs.append(gr.update(visible=True)) # Seg Group
+                                outputs.append(gr.update(value=sdata["text"]))
+                                outputs.append(gr.update(value=sdata["audio"]))
+                            else:
+                                outputs.append(gr.update(visible=False))
+                                outputs.append(gr.update(value=""))
+                                outputs.append(gr.update(value=None))
+                            
+                            # Hide candidates
+                            outputs.append(gr.update(visible=False))
+                            for _ in range(8): outputs.append(gr.update(value=None))
+                            outputs.append(gr.update(value=None))
                     else:
-                        outputs.append(gr.update(value=None, visible=False))
-                        outputs.append(gr.update(value=None, visible=False))
+                        outputs.append(gr.update(visible=False))
+                        outputs.append(gr.update(value=None))
+                        outputs.append(gr.update(value=""))
+                        for j in range(max_segments_per_chunk):
+                            outputs.append(gr.update(visible=False))
+                            outputs.append(gr.update(value=""))
+                            outputs.append(gr.update(value=None))
+                            outputs.append(gr.update(visible=False))
+                            for _ in range(8): outputs.append(gr.update(value=None))
+                            outputs.append(gr.update(value=None))
 
-                # Regular batch outputs (hidden in segmentation mode)
+                # 5. Hide Batch Outputs
                 for i in range(max_batch):
                     outputs.append(gr.update(value=None, visible=False))
+                
+                # 6. State
+                outputs.append(new_state)
 
                 return outputs
             else:
-                # Non-segmented inference
+                # Non-segmented
                 results = run_inference(
                     reference_speech=reference_speech,
                     reference_text=reference_text,
@@ -982,38 +1262,52 @@ def build_demo(
                     batch_count=batch_count,
                     duration_scale=duration_scale,
                 )
-
+                
                 outputs = []
-
-                # Concatenated outputs (hidden in non-segmentation mode)
-                for i in range(max_batch):
-                    outputs.append(gr.update(value=None, visible=False))
-
-                # Saved files (hidden in non-segmentation mode)
-                outputs.append(gr.update(value="", visible=False))
-
-                # Chunk outputs (hidden in non-segmentation mode)
+                for _ in range(max_batch): outputs.append(gr.update(visible=False))
+                outputs.append(gr.update(visible=False))
+                
+                # Hide all chunk/segments UI
                 for i in range(max_chunks):
-                    outputs.append(gr.update(value=None, visible=False))
-                    outputs.append(gr.update(value=None, visible=False))
-
-                # Regular batch outputs
+                    outputs.append(gr.update(visible=False))
+                    outputs.append(gr.update(value=None))
+                    outputs.append(gr.update(value=""))
+                    for j in range(max_segments_per_chunk):
+                        outputs.append(gr.update(visible=False))
+                        outputs.append(gr.update(value=""))
+                        outputs.append(gr.update(value=None))
+                        outputs.append(gr.update(visible=False))
+                        for _ in range(8): outputs.append(gr.update(value=None))
+                        outputs.append(gr.update(value=None))
+                
                 for i in range(max_batch):
                     if i < len(results):
-                        sr, wav = results[i]
-                        outputs.append(gr.update(value=(sr, wav), visible=True))
+                        outputs.append(gr.update(value=results[i], visible=True))
                     else:
                         outputs.append(gr.update(value=None, visible=False))
-
+                
+                outputs.append([])
+                
                 return outputs
 
-        # All outputs in order: concat, saved_files, chunks, batch
-        chunk_outputs = []
+        # Construct call outputs list using the same order
+        chunk_outputs_flat = []
         for i in range(max_chunks):
-            chunk_outputs.append(chunk_text_outputs[i])
-            chunk_outputs.append(chunk_audio_outputs[i])
+            ui = chunk_ui_elements[i]
+            chunk_outputs_flat.append(ui["group"])
+            chunk_outputs_flat.append(ui["audio"])
+            chunk_outputs_flat.append(ui["text"])
+            
+            for j in range(max_segments_per_chunk):
+                sui = all_segment_ui[i][j]
+                chunk_outputs_flat.append(sui["group"])
+                chunk_outputs_flat.append(sui["text"])
+                chunk_outputs_flat.append(sui["audio"])
+                chunk_outputs_flat.append(sui["cand_group"])
+                chunk_outputs_flat.extend(sui["cand_audios"])
+                chunk_outputs_flat.append(sui["radio"])
 
-        all_outputs = concatenated_audio_outputs + [saved_files_box] + chunk_outputs + output_audios
+        all_outputs = concatenated_audio_outputs + [saved_files_box] + chunk_outputs_flat + output_audios + [segments_state]
 
         generate_button.click(
             fn=gradio_inference,
