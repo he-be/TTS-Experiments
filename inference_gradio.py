@@ -752,16 +752,49 @@ def build_demo(
         with gr.Tabs() as tabs:
             with gr.Tab("台本生成 (Script Generation)", id="tab_script"):
                 gr.Markdown("### Script Generation (One-sided Manzai)")
-                api_key_val = os.getenv("OPENROUTER_API_KEY", "")
-                api_key_input = gr.Textbox(label="OpenRouter API Key (Optional if env var set)", value=api_key_val, type="password")
-
                 gr.Markdown("#### 1. Theme Selection")
                 with gr.Row():
                     theme_gen_btn = gr.Button("Generate Themes", variant="secondary")
                 
                 theme_radio = gr.Radio(label="Select a Theme", choices=[], visible=False, interactive=True)
                 
-                gr.Markdown("#### 2. Script Generation")
+                gr.Markdown("#### 2. Character Generation")
+                default_chars = """### キャラクター設定資料
+
+#### **キャラクターA：西園寺 紫織（さいおんじ しおり）**
+**（セリフが残る側 / ツッコミ＆語り役）**
+
+*   **年齢・所属**：大学3年生 / 文芸部
+*   **外見**：
+    *   肩まである艶やかな黒髪ロングヘア。
+    *   銀縁の知的なメガネを愛用。
+    *   フリルやレースをあしらった上品な「お嬢様風」ファッション（実は古着屋で掘り出した一点物が多い）。
+*   **性格**：
+    *   **知識顕示欲の化身**：隙あらば何かを解説・批評したいと常にうずうずしている。
+    *   **愛すべき面倒くささ**：自分の世界観に酔いがちだが、聞いてくれる相手には（たとえ聞いていなくても）尽くすタイプ。
+    *   **自滅型理論武装**：完璧な理論を組み立てようとして、自分で補足説明を付け足しすぎ、結果的に論点がブレて自滅する。
+*   **特徴的な癖**：
+    *   **リピート再生**：邪魔が入ると、「えーっと、だからね、」と最初の一文から全く同じイントネーションで言い直す。
+    *   **メタ的放棄**：Bのボケが限界を超えると、「あー今のナシ」「その脚注、本編に関係ないから」と冷淡に切り捨てる。
+*   **口調**：
+    *   田中ぽえむのことは、「あなた」or「田中さん」と呼ぶ
+    *   基本は「ですわ」「ますの」調のお嬢様言葉だが、興奮したり呆れたりすると素の女子大生口調が混じる。
+    *   やたらと漢語や文学的な比喩を使いたがる。
+
+#### **キャラクターB：田中 ぽえむ（たなか ぽえむ）**
+**（セリフが削除される側 / 自由奔放な聞き手）**
+
+*   **年齢・所属**：大学3年生 / アニメ研究会（文芸部書庫に入り浸っている）
+*   **外見**：
+    *   跳ねたショートヘア（寝癖率高め）。
+    *   パーカーにジャージ、あるいは謎の英文が書かれたTシャツ。
+*   **性格**：
+    *   **悪意なき破壊神**：紫織の話を「聞く気」はあるが、「理解する気」と「記憶する能力」が欠落している。
+    *   **超高速連想ゲーム**：単語一つから宇宙の彼方まで話題を飛ばす天才。
+    *   **枝葉ハンター**：本題の99%を無視し、残り1%のどうでもいいディテールに全力で食いつく。"""
+                char_settings_input = gr.Textbox(label="Character Personas", value=default_chars, lines=10, interactive=True)
+                
+                gr.Markdown("#### 3. Script Generation")
                 
                 with gr.Row():
                     script_gen_btn = gr.Button("Generate Script", variant="primary")
@@ -1360,13 +1393,14 @@ def build_demo(
         
         # Script Generation Handlers
 
-        def on_generate_themes(key, model="openai/gpt-5.2"):
-            real_key = key if key else os.getenv("OPENROUTER_API_KEY")
+        # Script Generation Handlers
+
+        def on_generate_themes(model="openai/gpt-5.2"):
+            # Uses env var strictly
+            real_key = os.getenv("OPENROUTER_API_KEY")
             if not real_key:
-                return [gr.update(visible=False, choices=[]), "Error: API Key missing"]
+                return [gr.update(visible=False, choices=[]), "Error: OPENROUTER_API_KEY not found in env."]
             
-            # yield "Generating themes..." # Can't yield to Radio easily without complex update
-            # Just return final list
             themes = script_generator.generate_themes(real_key, model)
             if not themes or (len(themes) == 1 and themes[0].startswith("Error")):
                 return [gr.update(visible=False, choices=[]), str(themes)]
@@ -1375,33 +1409,32 @@ def build_demo(
 
         theme_gen_btn.click(
             fn=on_generate_themes,
-            inputs=[api_key_input],
-            outputs=[theme_radio, script_output]
+            inputs=[],
+            outputs=[theme_radio, script_output] # Output status/error to script_output
         )
-        def on_generate_script(key, theme, model="openai/gpt-5.2"):
-            real_key = key if key else os.getenv("OPENROUTER_API_KEY")
-            if not real_key:
-                return "Error: API Key is missing. Please provide it or set OPENROUTER_API_KEY."
 
-            yield "Step 1: Generating initial script..."
-            s1 = script_generator.generate_manzai_script(real_key, theme, model)
+        def on_generate_script(theme, characters, model="openai/gpt-5.2"):
+            real_key = os.getenv("OPENROUTER_API_KEY")
+            if not real_key:
+                yield "Error: OPENROUTER_API_KEY is missing."
+                return
+
+            yield "Generating One-Sided Manzai Script (Direct)..."
+            
+            # Direct generation (faster, cheaper)
+            s1 = script_generator.generate_manzai_script(real_key, theme, characters, model)
+            
             if s1.startswith("Error"):
                 yield s1
                 return
 
-            yield "Step 2: Refining script (this may take a moment)...\n\nIntermediate Result:\n" + s1
-            s2 = script_generator.refine_manzai_script(s1, real_key, model)
-            if s2.startswith("Error"):
-                yield s2
-                return
-
-            yield "Step 3: Cleaning up..."
-            final = script_generator.clean_script_for_speech(s2)
+            yield "Cleaning up formatting..."
+            final = script_generator.clean_script_for_speech(s1)
             yield final
 
         script_gen_btn.click(
             fn=on_generate_script,
-            inputs=[api_key_input, theme_radio],
+            inputs=[theme_radio, char_settings_input],
             outputs=[script_output]
         )
 
@@ -1417,12 +1450,13 @@ def build_demo(
         )
 
         def on_transfer_script(text):
-            return [text, gr.Tabs(selected="tab_speech")]
+            print(f"[Debug] Transferring text: {text[:50]}...")
+            return gr.update(value=text)
 
         script_transfer_btn.click(
             fn=on_transfer_script,
             inputs=[script_output],
-            outputs=[target_text_box, tabs]
+            outputs=[target_text_box]
         )
     demo.launch(server_name="0.0.0.0", server_port=server_port, share=share, debug=True)
 

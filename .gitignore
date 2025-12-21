@@ -219,4 +219,11 @@ generated_tts/
 datasets/
 runs/
 t5gemma_voice_hf/
+outputs/
 *.pth
+
+# Local/Draft files
+.serena/
+texts/generated_script_*.txt
+refactor_gradio_v2_draft.py
+
