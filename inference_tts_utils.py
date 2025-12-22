@@ -228,20 +228,20 @@ def split_into_adaptive_chunks(
 
 def merge_short_sentences(
     sentences: List[str],
-    min_length: int = 13,
+    min_length: int = 6,
     max_length: int = 80,
 ) -> List[str]:
     """
     Merge short sentences with adjacent ones to ensure min/max length constraints.
 
     Key rules:
-    - Sentences >= min_length (13 chars) should remain as separate segments
+    - Sentences >= min_length (6 chars) should remain as separate segments
     - Only merge sentences < min_length together
     - Exception: merge >= min_length sentence with buffer only if buffer < min_length
 
     Args:
         sentences: List of sentence strings.
-        min_length: Minimum sentence length in characters (default: 13).
+        min_length: Minimum sentence length in characters (default: 6).
         max_length: Maximum sentence length in characters.
 
     Returns:
@@ -271,7 +271,7 @@ def merge_short_sentences(
                 merged.append(chunk)
             continue
 
-        # Case 1: Sentence is >= min_length (13 chars)
+        # Case 1: Sentence is >= min_length (6 chars)
         if len(sentence) >= min_length:
             # Check if there's a short buffer (< min_length) that needs merging
             if buffer and len(buffer) < min_length:
@@ -329,7 +329,7 @@ def merge_short_sentences(
 def segment_text_by_sentences(
     text: str,
     delimiters: str = _SENTENCE_DELIMITERS,
-    min_length: int = 13,
+    min_length: int = 6,
     max_length: int = 80,
     preserve_delimiter: bool = True,
 ) -> List[str]:
@@ -399,7 +399,7 @@ def segment_text_by_sentences(
 
 def concatenate_audio_segments(
     segments: List[Tuple[int, np.ndarray]],
-    silence_sec: float = 0.15,
+    silence_sec: float = 0.45,
 ) -> Tuple[int, np.ndarray]:
     """
     Concatenate audio segments with silence gaps between them.

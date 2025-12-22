@@ -753,10 +753,8 @@ def build_demo(
             with gr.Tab("台本生成 (Script Generation)", id="tab_script"):
                 gr.Markdown("### Script Generation (One-sided Manzai)")
                 gr.Markdown("#### 1. Theme Selection")
-                with gr.Row():
-                    theme_gen_btn = gr.Button("Generate Themes", variant="secondary")
                 
-                theme_radio = gr.Radio(label="Select a Theme", choices=[], visible=False, interactive=True)
+                theme_input = gr.Textbox(label="Theme (Enter a theme for the script)", placeholder="e.g. 「頭を冷やす」と言われて冷蔵庫に入ろうとする", interactive=True)
                 
                 gr.Markdown("#### 2. Character Generation")
                 default_chars = """### キャラクター設定資料
@@ -1395,25 +1393,9 @@ def build_demo(
 
         # Script Generation Handlers
 
-        def on_generate_themes(model="openai/gpt-5.2"):
-            # Uses env var strictly
-            real_key = os.getenv("OPENROUTER_API_KEY")
-            if not real_key:
-                return [gr.update(visible=False, choices=[]), "Error: OPENROUTER_API_KEY not found in env."]
-            
-            themes = script_generator.generate_themes(real_key, model)
-            if not themes or (len(themes) == 1 and themes[0].startswith("Error")):
-                return [gr.update(visible=False, choices=[]), str(themes)]
-            
-            return [gr.update(visible=True, choices=themes, value=None), "Themes Generated"]
 
-        theme_gen_btn.click(
-            fn=on_generate_themes,
-            inputs=[],
-            outputs=[theme_radio, script_output] # Output status/error to script_output
-        )
 
-        def on_generate_script(theme, characters, model="openai/gpt-5.2"):
+        def on_generate_script(theme, characters, model="google/gemini-3-flash-preview"):
             real_key = os.getenv("OPENROUTER_API_KEY")
             if not real_key:
                 yield "Error: OPENROUTER_API_KEY is missing."
@@ -1434,7 +1416,7 @@ def build_demo(
 
         script_gen_btn.click(
             fn=on_generate_script,
-            inputs=[theme_radio, char_settings_input],
+            inputs=[theme_input, char_settings_input],
             outputs=[script_output]
         )
 
