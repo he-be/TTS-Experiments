@@ -34,52 +34,28 @@ Aの発言だけから、Bが「言葉を字義通りにとってしまう」「
 「頭を冷やす」と言われて冷蔵庫に入ろうとする
 """
 
-# Base instruction for the Script Generator
-# This logic generates ONLY A's lines directly (One-Shot).
-# Base instruction for the Script Generator
-# This logic generates ONLY A's lines directly (One-Shot).
-SYSTEM_INSTRUCTION_TEMPLATE = """あなたは、日本語の「不条理会話劇」を作成するプロです。
+# Load prompts from files
+def load_prompt(filename):
+    try:
+        with open(os.path.join("prompts", filename), "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception as e:
+        print(f"[Warning] Failed to load {filename}: {e}")
+        return ""
+
+SYSTEM_INSTRUCTION_TEMPLATE = load_prompt("system_instruction.txt")
+CHARACTER_SETTINGS_DEFAULT = load_prompt("character_settings.txt")
+
+# Fallback if files are missing or empty
+if not SYSTEM_INSTRUCTION_TEMPLATE:
+    SYSTEM_INSTRUCTION_TEMPLATE = """あなたは、日本語の「不条理会話劇」を作成するプロです。
 「テーマ」と「キャラクター設定」を元に、キャラクターA（西園寺 紫織）の**「苦悩に満ちた一人漫才（Bの発言はトリミング済み）」**を出力してください。
 
 # Character Settings
 {character_settings}
 
-# Generation Logic (Slow-Paced Conflict Engine)
-**「会話のスピードを極限まで落とす」**ことが最大目標です。ポンポンと会話を進めないでください。
-
-以下のフローを意識して、**短い文章を改行多めで**出力してください。
-
-1.  **アンカー（本筋）の提示**：
-    Aがテーマについて話し始める。
-
-2.  **インビジブル・ボケ（不可視の妨害）**：
-    Bが何かを言う（出力しない）。これは「単語の勘違い」「字義通りの解釈」「唐突な生理的欲求」など、IQの低い割り込みです。
-
-3.  **Aのリアクション（ここが重要）**：
-    いきなり正解を言わせないでください。以下の3段階を踏んでください。
-    *   **Phase 1：困惑と確認**
-        「……はい？」「いや、ちょっと待って」
-        AはBが何を言ったのか理解できず、聞き返したり、オウム返しして確認する。
-    *   **Phase 2：真面目すぎる検討（泥沼化）**
-        「なるほど、あなたは〇〇だと思ったのね」
-        Bのボケをあえて真に受け、そのアホな理屈の中で成立するかどうかを大真面目に検証する。
-    *   **Phase 3：疲弊した否定**
-        「だから、そうじゃないの」
-        検証の結果、やはり話が通じないことを悟り、力なく本筋に戻ろうとする。
-
-4.  **リピート**：
-    Aは「えーっと、だからね」と冒頭に戻るが、またすぐに脱線する。
-
-# Formatting Rules
-- **一文を短く**：「〜ですが、〜で、〜なので」と繋げず、句点で切って改行する。
-- **フィラーを多用する**：「いや」「あのね」「えーっと」「待って」などを挟み、Aが困っている様子を表現する。
-- **直接引用の禁止**：「『お腹すいた』じゃないですわ」とは言わず、「今、胃袋の話は関係ないですわよね？」のように表現する。
-
-# Input Data
-- **テーマ**：{theme}
-
-# Output Format
-Markdown形式。Aのセリフのみを出力。行間を広めにとる演出のため、改行を多めに入れること。
+# Generation Logic
+(Fallback Prompt)
 """
 
 # ==============================================================================
@@ -97,8 +73,15 @@ def _call_openrouter(messages: list, api_key: str, model: str) -> Optional[str]:
         "model": model,
         "messages": messages,
     }
+    
+    # Provider Routing Optimization
+    if model == "z-ai/glm-4.7":
+        data["provider"] = {
+            "order": ["z-ai"],
+            "allow_fallbacks": False
+        }
     try:
-        response = requests.post(OPENROUTER_URL, headers=headers, json=data)
+        response = requests.post(OPENROUTER_URL, headers=headers, json=data, timeout=120)
         response.raise_for_status()
         result = response.json()
         if "choices" in result and len(result["choices"]) > 0:
@@ -138,6 +121,7 @@ def generate_manzai_script(api_key: str, theme: Optional[str] = None, characters
     """
     Generates the A-side script directly.
     """
+    print(f"[Debug] generate_manzai_script called with api_key: {api_key[:5]}..." if api_key else "[Debug] api_key is None/Empty")
     if not api_key:
         return "Error: API Key is missing."
     
@@ -145,6 +129,9 @@ def generate_manzai_script(api_key: str, theme: Optional[str] = None, characters
     if not theme:
         theme = "言葉のあやによるすれ違い"
     
+    if not characters:
+        characters = CHARACTER_SETTINGS_DEFAULT
+        
     if not characters:
         characters = """- **A：西園寺 紫織**（語り手）：
     - 基本は博識なお嬢様口調（「〜ですわ」「〜ますの」）だが、余裕がなくなると素が出る。
@@ -158,6 +145,7 @@ def generate_manzai_script(api_key: str, theme: Optional[str] = None, characters
         character_settings=characters
     )
 
+    print(f"[Debug] Prompt sent to model:\n{prompt}\n-------------------")
     messages = [
         {"role": "user", "content": prompt}
     ]
@@ -174,6 +162,8 @@ def clean_script_for_speech(text: str) -> str:
     Simple cleanup for the direct generation output.
     Most of the heavy lifting should be done by the prompt.
     """
+    # Pre-split by punctuation to ensure lines are separated
+    text = text.replace('。', '。\n').replace('！', '！\n').replace('？', '？\n')
     lines = text.split('\n')
     cleaned_lines = []
     
