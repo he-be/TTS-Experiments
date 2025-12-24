@@ -7,7 +7,8 @@ from typing import Optional
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 # MODEL_NAME = "openai/gpt-5.2"
-MODEL_NAME = "google/gemini-3-pro-preview"
+# MODEL_NAME = "google/gemini-3-pro-preview"
+MODEL_NAME = "z-ai/glm-4.7"
 
 # ==============================================================================
 # PROMPT CONFIGURATION
@@ -198,8 +199,8 @@ def clean_script_for_speech(text: str) -> str:
         line = re.sub(r'[\(（][^\)）]*[\)）]', '', line)
 
         # Replace ellipses with commas for stable TTS
-        line = re.sub(r'[…]+', '、', line)
-        line = re.sub(r'\.\.+', '、', line)
+        # line = re.sub(r'[…]+', '、', line)
+        # line = re.sub(r'\.\.+', '、', line)
         
         if line:
             cleaned_lines.append(line)
