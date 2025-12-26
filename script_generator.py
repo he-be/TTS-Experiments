@@ -40,8 +40,7 @@ def load_prompt(filename):
         with open(os.path.join("prompts", filename), "r", encoding="utf-8") as f:
             return f.read()
     except Exception as e:
-        print(f"[Warning] Failed to load {filename}: {e}")
-        return ""
+        raise FileNotFoundError(f"CRITICAL: Failed to load required prompt file '{filename}'. Ensure it exists in 'prompts/' directory. Details: {e}")
 
 SYSTEM_INSTRUCTION_TEMPLATE = load_prompt("system_instruction_conversation.txt")
 CHARACTER_SETTINGS_DEFAULT = load_prompt("character_settings.txt")
