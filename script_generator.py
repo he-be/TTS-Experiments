@@ -43,20 +43,9 @@ def load_prompt(filename):
         print(f"[Warning] Failed to load {filename}: {e}")
         return ""
 
-SYSTEM_INSTRUCTION_TEMPLATE = load_prompt("system_instruction.txt")
+SYSTEM_INSTRUCTION_TEMPLATE = load_prompt("system_instruction_conversation.txt")
 CHARACTER_SETTINGS_DEFAULT = load_prompt("character_settings.txt")
 
-# Fallback if files are missing or empty
-if not SYSTEM_INSTRUCTION_TEMPLATE:
-    SYSTEM_INSTRUCTION_TEMPLATE = """あなたは、日本語の「不条理会話劇」を作成するプロです。
-「テーマ」と「キャラクター設定」を元に、キャラクターA（西園寺 紫織）の**「苦悩に満ちた一人漫才（Bの発言はトリミング済み）」**を出力してください。
-
-# Character Settings
-{character_settings}
-
-# Generation Logic
-(Fallback Prompt)
-"""
 
 # ==============================================================================
 # API FUNCTIONS
@@ -119,7 +108,7 @@ def generate_themes(api_key: str, model: str = MODEL_NAME) -> list:
 
 def generate_manzai_script(api_key: str, theme: Optional[str] = None, characters: str = "", model: str = MODEL_NAME) -> str:
     """
-    Generates the A-side script directly.
+    Generates the A/B conversation script.
     """
     print(f"[Debug] generate_manzai_script called with api_key: {api_key[:5]}..." if api_key else "[Debug] api_key is None/Empty")
     if not api_key:
@@ -132,13 +121,6 @@ def generate_manzai_script(api_key: str, theme: Optional[str] = None, characters
     if not characters:
         characters = CHARACTER_SETTINGS_DEFAULT
         
-    if not characters:
-        characters = """- **A：西園寺 紫織**（語り手）：
-    - 基本は博識なお嬢様口調（「〜ですわ」「〜ますの」）だが、余裕がなくなると素が出る。
-    - **重要：説明魔である。** Bのどんなアホな発言に対しても、無視できずに「なぜ違うのか」をゼロから説明しようとする悪癖がある。
-- **B：田中 ぽえむ**（透明な聞き手）：
-    - **文脈無視の天才。** 音の響きだけで連想したり、小学生レベルの物理法則で生きていたりする。"""
-
     # Build prompt
     prompt = SYSTEM_INSTRUCTION_TEMPLATE.format(
         theme=theme,
@@ -150,7 +132,7 @@ def generate_manzai_script(api_key: str, theme: Optional[str] = None, characters
         {"role": "user", "content": prompt}
     ]
     
-    print(f"[Info] Generating direct script for theme '{theme}'...")
+    print(f"[Info] Generating conversation script for theme '{theme}'...")
     content = _call_openrouter(messages, api_key, model)
     if not content:
         return "Error: Failed to generate script."

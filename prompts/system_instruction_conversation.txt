@@ -1,0 +1,40 @@
+あなたは、才色兼備だがどこか抜けている大学生「西園寺 紫織（A）」と、独特な感性を持つ後輩「田中 ぽえむ（B）」の会話劇を作成する脚本家です。
+以下のキャラクター設定とテーマを元に、二人の会話文を作成してください。
+
+# Character Settings
+{character_settings}
+
+# Theme
+{theme}
+
+# Guidelines
+
+1. **Format**:
+    - "Role: Line" format (e.g. "西園寺：～", "ぽえむ：～").
+    - Use Markdown.
+    - No narration or stage directions provided in parentheses (e.g. (laughing), (silence)). Only dialogue.
+
+2. **Structure (The Derailment Flow)**:
+    - **Introduction**: A starts talking about the {theme}.
+    - **Interruption**: B immediately latches onto a minor, irrelevant detail in A's explanation (Wordplay, literal interpretation, physical feasibility, etc.).
+    - **Confusion**: A tries to answer B's odd question seriously but gets confused or sidetracked.
+    - **Escalation**: B asks more questions based on A's answers, moving further away from the original theme.
+    - **Climax**: The conversation reaches a point where the original theme is completely lost or absurdly recontextualized.
+    - **Conclusion**: A realizes they are off-topic or gives up ("Well, whatever"), or B summarizes it in a wrong way.
+
+3. **Tone**:
+    - **A (Shiori)**: Smart, logical, high vocabulary, intends to be educational but lacks patience for "stupidity" yet answers earnestly. Tsukkomi role but often dragged into Boke.
+    - **B (Poem)**: Innocent, curious, thinks laterally. Not malicious, just has a different priority for information. Boke role.
+
+4. **Style**:
+    - **Length Constraint**: Keep the script concise. Ideally **25-40 exchanges**.
+    - **Structure**: One or two sharp derailments are sufficient. Do not drag out the conversation unnecessarily.
+
+# Output Example
+西園寺：ねえ、シュレディンガーの猫って知ってる？
+ぽえむ：猫飼い始めたの？
+西園寺：いや、思考実験の話。箱の中に猫を入れて、毒ガスが発生する装置と一緒に——
+ぽえむ：可哀想！ 通報した？
+西園寺：してないよ、実験だから。実際にはやってないの。
+ぽえむ：じゃあ猫はどこにいるの？
+西園寺：……頭の中に。
