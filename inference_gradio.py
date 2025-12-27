@@ -10,6 +10,7 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
+import re
 import random
 from functools import lru_cache
 from types import MethodType
@@ -757,39 +758,13 @@ def build_demo(
                 theme_input = gr.Textbox(label="Theme (Enter a theme for the script)", placeholder="e.g. 「頭を冷やす」と言われて冷蔵庫に入ろうとする", interactive=True)
                 
                 gr.Markdown("#### 2. Character Generation")
-                default_chars = """### キャラクター設定資料
-
-#### **キャラクターA：西園寺 紫織（さいおんじ しおり）**
-**（セリフが残る側 / ツッコミ＆語り役）**
-
-*   **年齢・所属**：大学3年生 / 文芸部
-*   **外見**：
-    *   肩まである艶やかな黒髪ロングヘア。
-    *   銀縁の知的なメガネを愛用。
-    *   フリルやレースをあしらった上品な「お嬢様風」ファッション（実は古着屋で掘り出した一点物が多い）。
-*   **性格**：
-    *   **知識顕示欲の化身**：隙あらば何かを解説・批評したいと常にうずうずしている。
-    *   **愛すべき面倒くささ**：自分の世界観に酔いがちだが、聞いてくれる相手には（たとえ聞いていなくても）尽くすタイプ。
-    *   **自滅型理論武装**：完璧な理論を組み立てようとして、自分で補足説明を付け足しすぎ、結果的に論点がブレて自滅する。
-*   **特徴的な癖**：
-    *   **リピート再生**：邪魔が入ると、「えーっと、だからね、」と最初の一文から全く同じイントネーションで言い直す。
-    *   **メタ的放棄**：Bのボケが限界を超えると、「あー今のナシ」「その脚注、本編に関係ないから」と冷淡に切り捨てる。
-*   **口調**：
-    *   田中ぽえむのことは、「あなた」or「田中さん」と呼ぶ
-    *   基本は「ですわ」「ますの」調のお嬢様言葉だが、興奮したり呆れたりすると素の女子大生口調が混じる。
-    *   やたらと漢語や文学的な比喩を使いたがる。
-
-#### **キャラクターB：田中 ぽえむ（たなか ぽえむ）**
-**（セリフが削除される側 / 自由奔放な聞き手）**
-
-*   **年齢・所属**：大学3年生 / アニメ研究会（文芸部書庫に入り浸っている）
-*   **外見**：
-    *   跳ねたショートヘア（寝癖率高め）。
-    *   パーカーにジャージ、あるいは謎の英文が書かれたTシャツ。
-*   **性格**：
-    *   **悪意なき破壊神**：紫織の話を「聞く気」はあるが、「理解する気」と「記憶する能力」が欠落している。
-    *   **超高速連想ゲーム**：単語一つから宇宙の彼方まで話題を飛ばす天才。
-    *   **枝葉ハンター**：本題の99%を無視し、残り1%のどうでもいいディテールに全力で食いつく。"""
+                def load_prompt_file(path):
+                    if os.path.exists(path):
+                        with open(path, encoding='utf-8') as f:
+                            return f.read()
+                    return "" # No fallback to hardcoded values
+                
+                default_chars = load_prompt_file("prompts/character_settings.txt")
                 char_settings_input = gr.Textbox(label="Character Personas", value=default_chars, lines=10, interactive=True)
                 
                 gr.Markdown("#### 3. Script Generation")
@@ -873,7 +848,7 @@ def build_demo(
                     inter_segment_silence_box = gr.Slider(
                         label="Inter-segment Silence / セグメント間の無音（秒）",
                         minimum=0.0,
-                        maximum=2.0,
+                        maximum=10.0,
                         step=0.1,
                         value=inter_segment_silence,
                         info="Silence duration between segments when concatenating",
@@ -1103,9 +1078,8 @@ def build_demo(
                     
                     updated_chunk_audio = None
                     if seg_audios:
-                        # Use smaller silence for intra-chunk segments (hardcoded 0.05s) or use slider?
-                        # Using 0.05s as default for segment stitching to keep flow natural
-                        updated_chunk_audio = concatenate_audio_segments(seg_audios, silence_sec=0.05)
+                        # Use slider value for intra-chunk segments
+                        updated_chunk_audio = concatenate_audio_segments(seg_audios, silence_sec=inter_silence)
                         chunk_data["full_audio"] = updated_chunk_audio
                     
                     # 3. Stitch Chunks -> Full Audio
@@ -1393,31 +1367,81 @@ def build_demo(
 
         # Script Generation Handlers
 
+        def parse_script_for_one_sided(script_text: str) -> str:
+            """
+            Extract only Speaker A's lines for One-Sided Manzai.
+            Speaker A aliases: 西園寺, A, Shiori, S, 紫織
+            """
+            lines = script_text.strip().split('\n')
+            extracted_lines = []
+            
+            # Speaker A aliases
+            speaker_a_names = ["西園寺", "A", "Shiori", "S", "紫織"]
+            
+            for line in lines:
+                line = line.strip()
+                if not line: continue
+                
+                # Regex to match "Speaker: Content"
+                # Matches: "Name:", "Name：", "Name " (if clean enough?)
+                # Sticking to colon separator as per standard generation
+                match = re.search(r"^([^：:]+)[：:](.+)$", line)
+                if match:
+                    role = match.group(1).strip()
+                    content = match.group(2).strip()
+                    
+                    # Check if role matches Speaker A
+                    is_a = False
+                    for name in speaker_a_names:
+                        if name in role:
+                            is_a = True
+                            break
+                    
+                    if is_a:
+                        # Clean content (quotes etc) - basic clean
+                        content = content.replace('「', '').replace('」', '')
+                        extracted_lines.append(content)
+                        
+            return "\n".join(extracted_lines)
 
-
-        def on_generate_script(theme, characters, model="google/gemini-3-flash-preview"):
+        def on_generate_script(theme, characters, model="z-ai/glm-4.7"):
             real_key = os.getenv("OPENROUTER_API_KEY")
             if not real_key:
                 yield "Error: OPENROUTER_API_KEY is missing."
                 return
 
-            yield "Generating One-Sided Manzai Script (Direct)..."
+            yield "Generating Script (A & B)..."
             
-            # Direct generation (faster, cheaper)
+            # Use shared generator logic
+            # Note: generate_manzai_script returns the raw A/B script
             s1 = script_generator.generate_manzai_script(real_key, theme, characters, model)
             
-            if s1.startswith("Error"):
-                yield s1
-                return
-
-            yield "Cleaning up formatting..."
-            final = script_generator.clean_script_for_speech(s1)
-            yield final
+            yield s1
 
         script_gen_btn.click(
             fn=on_generate_script,
             inputs=[theme_input, char_settings_input],
             outputs=[script_output]
+        )
+
+        def on_parse_and_transfer(text):
+            if not text: return gr.update()
+            
+            # Parse A's lines
+            parsed_text = parse_script_for_one_sided(text)
+            
+            if not parsed_text:
+                return gr.update(value="[Error] No lines found for Speaker A (西園寺/A). Please check the script format.")
+            
+            print(f"[Info] Parsed and transferred {len(parsed_text)} chars.")
+            return gr.update(value=parsed_text)
+
+        # Re-purpose the transfer button
+        script_transfer_btn.value = "Parse & Copy to TTS Input / パースしてTTS入力へコピー"
+        script_transfer_btn.click(
+            fn=on_parse_and_transfer,
+            inputs=[script_output],
+            outputs=[target_text_box]
         )
 
         def on_save_script(text):
@@ -1429,16 +1453,6 @@ def build_demo(
             fn=on_save_script,
             inputs=[script_output],
             outputs=[script_save_status]
-        )
-
-        def on_transfer_script(text):
-            print(f"[Debug] Transferring text: {text[:50]}...")
-            return gr.update(value=text)
-
-        script_transfer_btn.click(
-            fn=on_transfer_script,
-            inputs=[script_output],
-            outputs=[target_text_box]
         )
     demo.launch(server_name="0.0.0.0", server_port=server_port, share=share, debug=True)
 
@@ -1463,7 +1477,7 @@ def main():
     parser.add_argument(
         "--inter_segment_silence",
         type=float,
-        default=0.05,
+        default=6.0,
         help="Silence (seconds) inserted between sentence segments when segmentation is enabled",
     )
     args = parser.parse_args()

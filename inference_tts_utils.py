@@ -232,16 +232,12 @@ def merge_short_sentences(
     max_length: int = 80,
 ) -> List[str]:
     """
-    Merge short sentences with adjacent ones to ensure min/max length constraints.
-
-    Key rules:
-    - Sentences >= min_length (6 chars) should remain as separate segments
-    - Only merge sentences < min_length together
-    - Exception: merge >= min_length sentence with buffer only if buffer < min_length
+    Merge sentences with adjacent ones to ensure they don't exceed max_length,
+    greedy-packing them to avoid short segments where possible.
 
     Args:
         sentences: List of sentence strings.
-        min_length: Minimum sentence length in characters (default: 6).
+        min_length: Minimum desired length (used as a soft hint, currently overridden by greedy strategy).
         max_length: Maximum sentence length in characters.
 
     Returns:
@@ -271,59 +267,70 @@ def merge_short_sentences(
                 merged.append(chunk)
             continue
 
-        # Case 1: Sentence is >= min_length (6 chars)
-        if len(sentence) >= min_length:
-            # Check if there's a short buffer (< min_length) that needs merging
-            if buffer and len(buffer) < min_length:
-                # Try to merge buffer with this sentence
-                if len(buffer) + len(sentence) <= max_length:
-                    # Can merge - this is "necessary" to fix the short buffer
-                    merged.append(buffer + sentence)
-                    buffer = ""
-                else:
-                    # Can't merge without exceeding max - output buffer as-is
-                    merged.append(buffer)
-                    merged.append(sentence)
-                    buffer = ""
-            else:
-                # Buffer is empty or >= min_length
-                # Output buffer first if it exists
-                if buffer:
-                    merged.append(buffer)
-                    buffer = ""
-                # Output this sentence as a separate segment
-                merged.append(sentence)
-
-        # Case 2: Sentence is < min_length (short sentence)
+        # Greedy accumulation
+        if not buffer:
+            buffer = sentence
         else:
-            # Accumulate in buffer
-            if not buffer:
-                buffer = sentence
-            elif len(buffer) + len(sentence) <= max_length:
-                # Can add to buffer
+            # Check if merging exceeds max_length
+            if len(buffer) + len(sentence) <= max_length:
                 buffer += sentence
-                # If buffer now meets min_length, output it (adaptive segmentation)
-                if len(buffer) >= min_length:
-                    merged.append(buffer)
-                    buffer = ""
             else:
-                # Can't add without exceeding max - flush buffer first
+                # Buffer is full, push it
                 merged.append(buffer)
                 buffer = sentence
 
-    # Handle remaining buffer
+    # Flush remaining buffer
     if buffer:
-        # If buffer is still short, try to merge with last segment
-        if merged and len(buffer) < min_length:
-            if len(merged[-1]) + len(buffer) <= max_length:
-                merged[-1] += buffer
-            else:
-                # Can't merge - output as-is
-                merged.append(buffer)
-        else:
-            merged.append(buffer)
+        merged.append(buffer)
 
     return merged
+
+
+def _adaptive_segmentation(
+    text: str,
+    delimiters: str = _SENTENCE_DELIMITERS,
+    min_length: int = 6,
+    max_length: int = 80,
+    preserve_delimiter: bool = True,
+) -> List[str]:
+    """
+    Split text into sentences by delimiters, then merge short sentences.
+    This is the fallback logic for long lines.
+    """
+    if not text or not text.strip():
+        return []
+
+    text = text.strip()
+
+    if preserve_delimiter:
+        # Split using lookbehind to keep delimiter with the segment
+        parts = re.split(f"({delimiters})", text)
+        segments = []
+        current = ""
+        for i, part in enumerate(parts):
+            if not part:
+                continue
+            if re.fullmatch(delimiters, part):
+                current += part
+            else:
+                if current:
+                    segments.append(current)
+                current = part
+        if current:
+            segments.append(current)
+    else:
+        segments = re.split(delimiters, text)
+
+    # Filter out empty segments
+    if preserve_delimiter:
+        segments = [s for s in segments if s and s.strip()]
+    else:
+        segments = [s.strip() for s in segments if s and s.strip()]
+
+    if not segments:
+        return [text]
+
+    return merge_short_sentences(segments, min_length=min_length, max_length=max_length)
 
 
 def segment_text_by_sentences(
@@ -334,67 +341,42 @@ def segment_text_by_sentences(
     preserve_delimiter: bool = True,
 ) -> List[str]:
     """
-    Split text into sentences by delimiters, then merge short sentences.
-
-    Args:
-        text: Input text to segment.
-        delimiters: Regex pattern for sentence-ending punctuation.
-        min_length: Minimum characters for a valid segment (after merging).
-        max_length: Maximum characters for a segment (enforced during merging).
-        preserve_delimiter: Keep the delimiter at end of each segment.
-
-    Returns:
-        List of sentence segments. If no delimiters found, returns [text].
+    Split text into segments.
+    
+    Strategy:
+    1. Split strictly by newlines first.
+    2. If a line is within max_length, keep it as one segment (preserving flow).
+    3. If a line exceeds max_length, use adaptive segmentation (split by punctuation & merge).
     """
-    if not text or not text.strip():
+    if not text:
         return []
+    
+    # splitlines() handles \n, \r, \r\n etc.
+    raw_lines = text.splitlines()
+    final_segments = []
 
-    text = text.strip()
+    for line in raw_lines:
+        line = line.strip()
+        if not line:
+            continue
+            
+        if len(line) <= max_length:
+            # Short enough: keep as is
+            final_segments.append(line)
+        else:
+            # Too long: apply adaptive segmentation
+            # We use strictly punctuation delimiters to avoid re-splitting by newlines (though they shouldn't exist in a line)
+            punct_delimiters = r"[。！？!?\.]+"
+            adaptive_segs = _adaptive_segmentation(
+                line, 
+                delimiters=punct_delimiters, 
+                min_length=min_length, 
+                max_length=max_length,
+                preserve_delimiter=preserve_delimiter
+            )
+            final_segments.extend(adaptive_segs)
 
-    if preserve_delimiter:
-        # Split using lookbehind to keep delimiter with the segment
-        # This splits AFTER the delimiter pattern
-        parts = re.split(f"({delimiters})", text)
-
-        # Merge delimiter back to previous segment
-        segments = []
-        current = ""
-        for i, part in enumerate(parts):
-            if not part:
-                continue
-            if re.fullmatch(delimiters, part):
-                # This is a delimiter, append to current segment
-                current += part
-            else:
-                # This is text content
-                if current:
-                    segments.append(current)
-                current = part
-
-        # Don't forget the last segment
-        if current:
-            segments.append(current)
-    else:
-        # Simple split, delimiters are removed
-        segments = re.split(delimiters, text)
-
-    # Filter out empty segments
-    if preserve_delimiter:
-        # When preserving delimiters, keep them intact (don't strip)
-        # But remove truly empty segments
-        segments = [s for s in segments if s and s.strip()]
-    else:
-        # When delimiters are removed, strip whitespace
-        segments = [s.strip() for s in segments if s and s.strip()]
-
-    # If no valid segments, return original text
-    if not segments:
-        return [text]
-
-    # Merge short sentences to ensure min/max length constraints
-    segments = merge_short_sentences(segments, min_length=min_length, max_length=max_length)
-
-    return segments
+    return final_segments
 
 
 def concatenate_audio_segments(

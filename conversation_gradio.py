@@ -5,6 +5,8 @@ Based on inference_gradio.py logic.
 
 import argparse
 import os
+from dotenv import load_dotenv
+load_dotenv()
 import re
 import random
 import numpy as np
@@ -337,7 +339,7 @@ def generate_conversation(
 # UI Construction
 # ---------------------------------------------------------------------------
 
-def build_demo(resources, port):
+def build_demo(resources, port, share=False):
     with gr.Blocks(title="Manzai Maker (Clean)") as demo:
         state = gr.State([])
         
@@ -345,7 +347,6 @@ def build_demo(resources, port):
             # TAB 1: Script
             with gr.Tab("1. Script Gen"):
                 theme = gr.Textbox(label="Theme", value="「二手に分かれよう」提案、明らかに悪手なのになぜ採用されるのか")
-                key = gr.Textbox(label="API Key", type="password")
                 
                 def load_txt(p):
                     if os.path.exists(p):
@@ -357,12 +358,12 @@ def build_demo(resources, port):
                 script_out = gr.Textbox(label="Generated Script", lines=10, interactive=True)
                 transfer_btn = gr.Button("Transfer ->")
                 
-                def gen_script(t, c, k):
-                    real_key = k or os.environ.get("OPENROUTER_API_KEY")
-                    if not real_key: return "Error: No API Key"
+                def gen_script(t, c):
+                    real_key = os.environ.get("OPENROUTER_API_KEY")
+                    if not real_key: return "Error: OPENROUTER_API_KEY not found in environment."
                     return script_generator.generate_manzai_script(real_key, t, c)
                 
-                gen_btn.click(gen_script, [theme, chars, key], [script_out])
+                gen_btn.click(gen_script, [theme, chars], [script_out])
             
             # TAB 2: TTS
             with gr.Tab("2. TTS Production"):
@@ -450,7 +451,7 @@ def build_demo(resources, port):
                 merge_btn = gr.Button("Merge All Lines", variant="secondary")
                 merge_btn.click(merge_all, [state], [merged_out])
                 
-    demo.launch(server_name="0.0.0.0", server_port=port, share=True)
+    demo.launch(server_name="0.0.0.0", server_port=port, share=share)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -471,7 +472,7 @@ def main():
     resources = _load_resources(
         args.model_dir, None, None, False, args.cpu_codec, whisper_device
     )
-    build_demo(resources, args.port)
+    build_demo(resources, args.port, share=args.share)
 
 if __name__ == "__main__":
     main()

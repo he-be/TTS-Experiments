@@ -7,6 +7,7 @@
 # Theme
 {theme}
 
+
 # Guidelines
 
 1. **Format**:
@@ -14,27 +15,37 @@
     - Use Markdown.
     - No narration or stage directions provided in parentheses (e.g. (laughing), (silence)). Only dialogue.
 
-2. **Structure (The Derailment Flow)**:
-    - **Introduction**: A starts talking about the {theme}.
-    - **Interruption**: B immediately latches onto a minor, irrelevant detail in A's explanation (Wordplay, literal interpretation, physical feasibility, etc.).
-    - **Confusion**: A tries to answer B's odd question seriously but gets confused or sidetracked.
-    - **Escalation**: B asks more questions based on A's answers, moving further away from the original theme.
-    - **Climax**: The conversation reaches a point where the original theme is completely lost or absurdly recontextualized.
-    - **Conclusion**: A realizes they are off-topic or gives up ("Well, whatever"), or B summarizes it in a wrong way.
+2. **Core Mechanic (The "Parallel Universe" Conversation)**
+    - **Avoid Simple Word Association**: Do NOT have Poem merely react to the last word Shiori said (e.g., "Sweat -> Salty?"). This is boring.
+    - **B's Misunderstanding Logic**: Poem should interpret Shiori's abstract concepts as **grand, conspiratorial, poetic, or absurdly specific physical phenomena**. Her "leap of logic" should be surprising, not linear.
+    - **A's Struggle**: Shiori should not just explain. She should get **confused**, **dragged into Poem's logic**, or **accidentally validate** Poem's weird ideas before realizing it.
+    - **The "Punchline"**: The conversation must end with a "conceptual crash" where Poem's misunderstood reality overwrites Shiori's intended topic.
 
-3. **Tone**:
-    - **A (Shiori)**: Smart, logical, high vocabulary, intends to be educational but lacks patience for "stupidity" yet answers earnestly. Tsukkomi role but often dragged into Boke.
-    - **B (Poem)**: Innocent, curious, thinks laterally. Not malicious, just has a different priority for information. Boke role.
+3. **Flow**:
+    - **Trigger**: A introduces a topic with a specific vocabulary.
+    - **The Leap**: B ignores the context and reinterprets the vocabulary in a bizarre way (e.g., "Captive Audience" -> "Are we being held hostage by aliens?").
+    - **The Chase**: A tries to correct it using logic, but B uses that logic to reinforce her wrong idea.
+    - **The Submission**: A inadvertently says something that sounds like she agrees with B's crazy theory.
+    - **The Ochi**: B concludes with a triumphant but completely wrong summary.
 
-4. **Style**:
-    - **Length Constraint**: Keep the script concise. Ideally **25-40 exchanges**.
-    - **Structure**: One or two sharp derailments are sufficient. Do not drag out the conversation unnecessarily.
+4. **Tone**:
+    - **A (Shiori)**: Smart but fragile. Easily flustered when her logic doesn't work. Speaks fast when explaining.
+    - **B (Poem)**: Dreamy, confident in her wrongness. Never asks simple questions; asks *weirdly specific* questions about her wrong theory.
+
+5. **Style**:
+    - **Length**: 20-30 exchanges. Keep it punchy.
+    - **No "Question-Answer" Ping-Pong**: Break the rhythm. Have B interrupt. Have A give up halfway.
 
 # Output Example
-西園寺：ねえ、シュレディンガーの猫って知ってる？
-ぽえむ：猫飼い始めたの？
-西園寺：いや、思考実験の話。箱の中に猫を入れて、毒ガスが発生する装置と一緒に——
-ぽえむ：可哀想！ 通報した？
-西園寺：してないよ、実験だから。実際にはやってないの。
-ぽえむ：じゃあ猫はどこにいるの？
-西園寺：……頭の中に。
+西園寺：シュレディンガーの猫っていうのは、観測されるまで状態が確定しないって話で——
+ぽえむ：え、かわいそう。箱の中でずっと誰かに見られるのを待ってるの？ アイドル？
+西園寺：アイドルじゃないし、待ってるわけでも……いや、ある意味では「観客」を待ってると言えるのか？
+ぽえむ：やっぱり！ じゃあ箱を開けるのは握手会のチケット持ってる人だけ？
+西園寺：チケットはいらないけど、観測者が干渉することで——
+ぽえむ：干渉……、ファンサ？
+西園寺：違う、物理的な相互作用のことで……あれ、でもファンサも相互作用？
+ぽえむ：猫ちゃん、箱の中でファンサの練習して死んじゃうの？
+西園寺：死んでない！ 重ね合わせの状態だってば！ 生きてて死んでるの！
+ぽえむ：ゾンビアイドル……新しい。
+西園寺：……もういい、私が間違ってた。
+
