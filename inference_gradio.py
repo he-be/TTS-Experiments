@@ -10,6 +10,12 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="torchaudio")
+warnings.filterwarnings("ignore", category=UserWarning, message=".*Trying to convert audio automatically.*")
+warnings.filterwarnings("ignore", category=FutureWarning, message=".*torch_dtype.*")
+warnings.filterwarnings("ignore", category=UserWarning, message=".*You are using a model of type xcodec2.*")
+
 import re
 import random
 from functools import lru_cache
