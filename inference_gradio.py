@@ -1010,12 +1010,15 @@ def build_demo(
                     min_p,
                     temperature,
                     seed,
+                    progress=gr.Progress(),
                 ):
+                    progress(0.1, desc="Initializing...")
                     print(f"[Info] Regenerating Chunk {chunk_idx+1}-Seg {seg_idx+1}: {text}")
                     seed_val = None
                     if str(seed).strip() not in {"", "None", "none"}:
                         seed_val = int(float(seed))
                     
+                    progress(0.3, desc="Generating 8 candidates (batch)...")
                     # Run inference for this segment text as a single sample (batch 8 candidates)
                     results = run_inference(
                         reference_speech=reference_speech,
@@ -1031,6 +1034,7 @@ def build_demo(
                         batch_count=8, 
                         duration_scale=duration_scale,
                     )
+                    progress(1.0, desc="Rendering...")
                     
                     # Update state with new text and candidates
                     new_state = list(current_state)
@@ -1049,7 +1053,12 @@ def build_demo(
                             outputs.append(gr.update(value=None, visible=False))
                     outputs.append(gr.update(value=None)) # reset radio
                     outputs.append(new_state)
+                    # Reset button state
+                    outputs.append(gr.update(value="Regen", interactive=True))
                     return outputs
+        
+                def start_regen():
+                    return gr.update(value="Wait...", interactive=False)
         
                 def update_segment(
                     chunk_idx,
@@ -1103,6 +1112,11 @@ def build_demo(
                         
                         # Regen
                         ui["regen_btn"].click(
+                            fn=start_regen,
+                            inputs=None,
+                            outputs=[ui["regen_btn"]],
+                            queue=False,
+                        ).then(
                             fn=regenerate_segment,
                             inputs=[
                                 gr.Number(value=chunk_i, visible=False),
@@ -1118,7 +1132,8 @@ def build_demo(
                                 temperature_box,
                                 seed_box,
                             ],
-                            outputs=[ui["cand_group"]] + ui["cand_audios"] + [ui["radio"], segments_state],
+                            outputs=[ui["cand_group"]] + ui["cand_audios"] + [ui["radio"], segments_state, ui["regen_btn"]],
+                            show_progress="full",
                         )
         
                         # Update
@@ -1454,6 +1469,7 @@ def build_demo(
             inputs=[script_output],
             outputs=[script_save_status]
         )
+    demo.queue()
     demo.launch(server_name="0.0.0.0", server_port=server_port, share=share, debug=True)
 
 

@@ -227,3 +227,4 @@ outputs/
 texts/generated_script_*.txt
 refactor_gradio_v2_draft.py
 
+ref*

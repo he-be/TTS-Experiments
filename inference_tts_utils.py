@@ -145,84 +145,49 @@ def split_into_adaptive_chunks(
     delimiters: str = _SENTENCE_DELIMITERS,
     min_size: int = 400,
     max_size: int = 600,
+    max_segments: int = 20,
 ) -> List[str]:
     """
-    Split text into adaptive chunks around target_size characters.
-
-    Tries to split at sentence delimiters to create natural chunks.
-    Each chunk will be between min_size and max_size characters.
-
-    Args:
-        text: Input text to chunk.
-        target_size: Target chunk size in characters.
-        delimiters: Regex pattern for sentence-ending punctuation.
-        min_size: Minimum chunk size.
-        max_size: Maximum chunk size.
-
-    Returns:
-        List of text chunks.
+    Split text into chunks that respect both character size and segment count limits.
+    
+    1. First, segment the entire text using the standard segmentation logic.
+    2. Group these segments into chunks such that:
+       - No chunk exceeds max_size characters (soft limit, unless a single segment is huge).
+       - No chunk exceeds max_segments (hard limit to prevent VRAM OOM).
     """
     if not text or not text.strip():
         return []
 
-    text = text.strip()
-
-    # If text is shorter than max_size, return as single chunk
-    if len(text) <= max_size:
-        return [text]
-
-    # For chunking, use only punctuation delimiters (not newlines)
-    # This preserves newlines within chunks for later segmentation
-    punct_delimiters = r"[。！？!?\.]+"
-
-    # Split by sentences first (using only punctuation, preserving newlines)
-    sentences = segment_text_by_sentences(text, delimiters=punct_delimiters, min_length=1, preserve_delimiter=True)
-    if not sentences:
-        # Fallback: hard split by max_size
-        return [text[i:i+max_size] for i in range(0, len(text), max_size)]
-
+    # 1. Get atomic segments first (preserves newlines, handles long lines)
+    # We use the standard logic which is now robust
+    all_segments = segment_text_by_sentences(text, preserve_delimiter=True)
+    
     chunks = []
-    current_chunk = ""
-
-    for sentence in sentences:
-        # If adding this sentence would exceed max_size
-        if current_chunk and len(current_chunk) + len(sentence) > max_size:
-            # Save current chunk if it meets min_size
-            if len(current_chunk) >= min_size:
-                chunks.append(current_chunk)
-                current_chunk = sentence
-            else:
-                # Current chunk is too small, but adding would exceed max
-                # Force split: save current + start new with this sentence
-                chunks.append(current_chunk)
-                current_chunk = sentence
-        # If current chunk + sentence is around target or doesn't exceed max
-        elif current_chunk and len(current_chunk) + len(sentence) >= target_size:
-            # Good size, save it
-            chunks.append(current_chunk)
-            current_chunk = sentence
-        else:
-            # Keep accumulating
-            current_chunk += sentence
-
-    # Don't forget the last chunk
-    if current_chunk:
-        # If current chunk itself exceeds max_size, hard split it
-        if len(current_chunk) > max_size:
-            # Hard split into max_size chunks
-            for i in range(0, len(current_chunk), max_size):
-                chunks.append(current_chunk[i:i+max_size])
-        # If last chunk is too small, try to merge with previous
-        elif chunks and len(current_chunk) < min_size:
-            # Only merge if it doesn't exceed max_size
-            if len(chunks[-1]) + len(current_chunk) <= max_size:
-                chunks[-1] += current_chunk
-            else:
-                # Can't merge - must keep as separate chunk even if small
-                chunks.append(current_chunk)
-        else:
-            chunks.append(current_chunk)
-
+    current_chunk_segs = []
+    current_chunk_len = 0
+    
+    for seg in all_segments:
+        seg_len = len(seg)
+        
+        # Check limits
+        # Condition 1: Segment count limit
+        count_limit_reached = len(current_chunk_segs) >= max_segments
+        # Condition 2: Character size limit
+        size_limit_reached = (current_chunk_len + seg_len > max_size) and (current_chunk_len > 0)
+        
+        if count_limit_reached or size_limit_reached:
+            # Flush current chunk
+            chunks.append("".join(current_chunk_segs))
+            current_chunk_segs = []
+            current_chunk_len = 0
+            
+        current_chunk_segs.append(seg)
+        current_chunk_len += seg_len
+        
+    # Flush remaining
+    if current_chunk_segs:
+        chunks.append("".join(current_chunk_segs))
+        
     return chunks
 
 
@@ -352,20 +317,32 @@ def segment_text_by_sentences(
         return []
     
     # splitlines() handles \n, \r, \r\n etc.
-    raw_lines = text.splitlines()
+    raw_lines = text.splitlines(keepends=preserve_delimiter)
     final_segments = []
 
     for line in raw_lines:
-        line = line.strip()
-        if not line:
-            continue
+        # Normalize whitespace but keep delimiter if requested
+        if preserve_delimiter:
+            # Check if line originally had a newline/return
+            has_newline = line.endswith(('\n', '\r'))
+            content = line.strip()
+            if not content:
+                continue
+            if has_newline:
+                line = content + "\n"
+            else:
+                line = content
+        else:
+            line = line.strip()
+            if not line:
+                continue
             
-        if len(line) <= max_length:
+        if len(line.strip()) <= max_length:
             # Short enough: keep as is
             final_segments.append(line)
         else:
             # Too long: apply adaptive segmentation
-            # We use strictly punctuation delimiters to avoid re-splitting by newlines (though they shouldn't exist in a line)
+            # We use strictly punctuation delimiters to avoid re-splitting by newlines
             punct_delimiters = r"[。！？!?\.]+"
             adaptive_segs = _adaptive_segmentation(
                 line, 
@@ -374,6 +351,13 @@ def segment_text_by_sentences(
                 max_length=max_length,
                 preserve_delimiter=preserve_delimiter
             )
+            
+            # If the original line had a newline, ensure the last segment has it too
+            # (adaptive segmentation might have stripped it)
+            if preserve_delimiter and line.endswith('\n') and adaptive_segs:
+                if not adaptive_segs[-1].endswith('\n'):
+                     adaptive_segs[-1] += '\n'
+            
             final_segments.extend(adaptive_segs)
 
     return final_segments
