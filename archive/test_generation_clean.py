@@ -18,7 +18,7 @@ def test_full_flow():
     with open("texts/character.txt", "r") as f:
         chars = f.read()
 
-    theme = "「頭を冷やす」と言われて冷蔵庫に入ろうとする"
+    theme = "「頭を冷やす」と言われて冷蔵庫に入ろうとする（メタ漫才ロジックテスト）"
     
     print(f"--- 1. Generating Script for Theme: {theme} ---")
     print(f"--- Settings Length: {len(chars)} chars ---")
@@ -37,6 +37,11 @@ def test_full_flow():
 
     # 3. Parse/Clean
     print("\n--- 2. Testing Parsing/Cleaning ---")
+    # Manual test for ellipses
+    test_str = "なぜ今、一番下の引き出しを……野菜室を、限界まで引き出しましたの？……。"
+    print(f"Test Input: {test_str}")
+    print(f"Test Output: {script_generator.clean_script_for_speech(test_str)}")
+    
     cleaned_script = script_generator.clean_script_for_speech(raw_script)
     
     print("--- Cleaned Output (Ready for A-side TTS) ---")

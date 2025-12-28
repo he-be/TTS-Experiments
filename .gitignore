@@ -228,3 +228,11 @@ texts/generated_script_*.txt
 refactor_gradio_v2_draft.py
 
 ref*
+
+# Generated files
+texts/generated_script_*.txt
+texts/memo_*.txt
+texts/verification_result_*.txt
+optimization_logs/
+.gradio/
+*.log
