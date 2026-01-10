@@ -591,3 +591,228 @@ def run_inference_segmented(
         all_saved_files,
         all_segments_details,
     )
+
+
+def run_inference_batch(
+    target_texts: List[str],
+    reference_speech: Optional[str],
+    reference_text: Optional[str],
+    duration_scale: float,
+    top_k: int,
+    top_p: float,
+    min_p: float,
+    temperature: float,
+    seed: Optional[int],
+    resources: dict,
+    cut_off_sec: int = 100,
+    lang: Optional[str] = None,
+) -> List[Tuple[int, np.ndarray]]:
+    """
+    Run batched inference for a list of distinct texts.
+    Returns a list of (sample_rate, waveform) tuples in the same order as target_texts.
+    """
+    model = resources["model"]
+    cfg = resources["cfg"]
+    text_tokenizer = resources["text_tokenizer"]
+    audio_tokenizer = resources["audio_tokenizer"]
+    device = resources["device"]
+    codec_audio_sr = resources["codec_audio_sr"]
+    codec_sr = resources["codec_sr"]
+
+    if not target_texts:
+        return []
+
+    # 1. Prepare Reference
+    no_reference_audio = reference_speech is None or str(reference_speech).strip().lower() in {"", "none", "null"}
+    has_reference_text = reference_text not in (None, "", "none", "null")
+
+    if no_reference_audio:
+        prefix_transcript = ""
+    elif not has_reference_text:
+        print("[Info] Batch: No reference text; transcribing reference speech...")
+        prefix_transcript = transcribe_audio(reference_speech, resources["whisper_device"])
+        unload_whisper_model()
+    else:
+        prefix_transcript = reference_text
+
+    # Reference Audio Tokens
+    if not no_reference_audio:
+        info = get_audio_info(reference_speech)
+        prompt_end_frame = int(cut_off_sec * get_sample_rate(info))
+        encoded_frames = tokenize_audio(
+            audio_tokenizer,
+            reference_speech,
+            offset=0,
+            num_frames=prompt_end_frame if prompt_end_frame > 0 else -1,
+        )
+    else:
+        prompt_end_frame = 0
+        encoded_frames = torch.empty((1, 1, 0), dtype=torch.long, device=audio_tokenizer.device)
+
+    # Ensure proper shape [1, 1, T]
+    if encoded_frames.ndim == 2:
+        encoded_frames = encoded_frames.unsqueeze(0)
+    if encoded_frames.shape[2] == 1:
+        encoded_frames = encoded_frames.transpose(1, 2).contiguous()
+
+    # Add y_sep token
+    y_sep_token = getattr(cfg, "y_sep_token", None)
+    if y_sep_token is not None and not no_reference_audio and encoded_frames.shape[2] > 0:
+        encoded_frames = torch.cat([
+            encoded_frames,
+            torch.full((1, 1, 1), y_sep_token, dtype=torch.long, device=encoded_frames.device),
+        ], dim=2)
+    
+    original_audio = encoded_frames.transpose(2, 1).contiguous()  # [1, T, 1]
+    prompt_frames = original_audio.shape[1]
+
+    # 2. Normalize & Params
+    lang = None if lang in {None, "", "none", "null"} else str(lang)
+    lang_code = lang 
+    
+    def encode_text_hf(text):
+        if isinstance(text, list):
+            text = " ".join(text)
+        return text_tokenizer.encode(text.strip(), add_special_tokens=False)
+
+    x_sep_token = getattr(cfg, "x_sep_token", None)
+    add_eos_token = getattr(cfg, "add_eos_to_text", 0)
+    add_bos_token = getattr(cfg, "add_bos_to_text", 0)
+
+    # 3. Preprocessing Loop
+    all_text_tokens = []
+    tgt_y_lens_list = []
+    
+    for i, txt in enumerate(target_texts):
+        # Normalize
+        norm_txt, detected_lang = normalize_text_with_lang(txt, lang if lang else None)
+        if not lang_code: lang_code = detected_lang
+        
+        # Helper:
+        ref_trans_norm = ""
+        if prefix_transcript:
+             ref_trans_norm, _ = normalize_text_with_lang(prefix_transcript, lang_code)
+
+        dur = estimate_duration(
+            target_text=norm_txt,
+            reference_speech=None if no_reference_audio else reference_speech,
+            reference_transcript=ref_trans_norm if not no_reference_audio else None,
+            target_lang=lang_code,
+            reference_lang=lang_code,
+        )
+        
+        # Scale
+        if duration_scale != 1.0:
+            actual_scale = adaptive_duration_scale(dur, duration_scale)
+            dur = dur * actual_scale
+            
+        tgt_len = int(prompt_frames + codec_sr * dur)
+        tgt_y_lens_list.append(tgt_len)
+
+        # Tokens
+        tokens = encode_text_hf(norm_txt)
+        if prefix_transcript:
+            prefix_tokens = encode_text_hf(ref_trans_norm)
+            if x_sep_token is not None:
+                tokens = prefix_tokens + [x_sep_token] + tokens
+            else:
+                tokens = prefix_tokens + tokens
+        
+        if add_eos_token:
+            tokens.append(add_eos_token)
+        if add_bos_token:
+            tokens = [add_bos_token] + tokens
+            
+        all_text_tokens.append(tokens)
+
+    # 4. Batch Construction
+    max_len = max(len(t) for t in all_text_tokens)
+    pad_token_id = text_tokenizer.pad_token_id or 0
+    
+    x_padded = torch.full((len(target_texts), max_len), pad_token_id, dtype=torch.long, device=device)
+    x_lens = torch.zeros(len(target_texts), dtype=torch.long, device=device)
+    
+    for i, tokens in enumerate(all_text_tokens):
+        x_padded[i, :len(tokens)] = torch.tensor(tokens, dtype=torch.long)
+        x_lens[i] = len(tokens)
+        
+    tgt_y_lens = torch.tensor(tgt_y_lens_list, dtype=torch.long, device=device)
+
+    # 5. Inference
+    base_seed = seed if seed is not None else random.SystemRandom().randint(0, 2**31 - 1)
+    # Important: Do NOT enable deterministic unless env var says so
+    seed_everything(base_seed, deterministic=bool(int(os.getenv("T5GEMMA_DETERMINISTIC", "0"))))
+    
+    target_mod = model._orig_mod if hasattr(model, "_orig_mod") else model
+    
+    gen_frames = []
+    if hasattr(target_mod, "inference_tts_batch_multi_text"):
+        print(f"[Info] Running batch inference for {len(target_texts)} items...")
+        silence_tokens = []
+        stop_repetition = 3
+        
+        _, gen_frames = target_mod.inference_tts_batch_multi_text(
+            x_padded,
+            x_lens,
+            original_audio.to(device),
+            tgt_y_lens=tgt_y_lens,
+            top_k=int(top_k),
+            top_p=float(top_p),
+            min_p=float(min_p),
+            temperature=float(temperature),
+            stop_repetition=stop_repetition,
+            silence_tokens=silence_tokens,
+            prompt_frames=prompt_frames,
+        )
+    else:
+        print("[Error] inference_tts_batch_multi_text not found.")
+        return []
+
+    # 6. Decode
+    results = []
+    eos_token = getattr(cfg, "eos", getattr(cfg, "eog", None))
+
+    def strip_special(frames):
+        # frames: [1, 1, T]
+        # Identify special/invalid tokens
+        is_special = torch.zeros_like(frames, dtype=torch.bool)
+        if y_sep_token is not None:
+            is_special |= frames.eq(y_sep_token)
+        if eos_token is not None:
+            is_special |= frames.eq(eos_token)
+        
+        # Also check out of bounds (vocab size 65536)
+        is_special |= frames.ge(65536) 
+        
+        # Check if any special token exists
+        if not is_special.any():
+            return frames
+
+        # Find first occurrence of special token
+        # We assume frames is [1, 1, T] -> flatten to [T] or find index along dim 2
+        # Since it's [1, 1, T], allow simple flattening for index search
+        flat = is_special.flatten()
+        first_idx = torch.argmax(flat.int()).item()
+        
+        # argmax returns 0 if all false, but we checked .any() above.
+        # So first_idx is effectively the new length.
+        return frames[:, :, :first_idx]
+
+    for gf in gen_frames:
+        # gf is [1, 1, T] usually
+        gf_clean = strip_special(gf)
+        
+        try:
+            decoded = audio_tokenizer.decode(gf_clean) # [1, samples]
+        except IndexError as e:
+            print(f"[Error] Decode failed even after stripping: {e}")
+            continue
+            
+        gen_tensor = decoded[0].detach().cpu()
+        if gen_tensor.ndim == 2 and gen_tensor.shape[0] == 1:
+            gen_tensor = gen_tensor.squeeze(0)
+        waveform = gen_tensor.numpy()
+        results.append((codec_audio_sr, waveform))
+
+    return results
+

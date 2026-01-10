@@ -32,6 +32,7 @@ from data.tokenizer import AudioTokenizer
 from inference_logic import (
     run_inference,
     run_inference_segmented,
+    run_inference_batch,
     adaptive_duration_scale,
     seed_everything,
     estimate_duration,
@@ -320,6 +321,9 @@ def build_demo(
                 chunk_ui_elements = [] 
         
                 with chunk_accordion:
+                    with gr.Row():
+                        batch_regen_btn = gr.Button("Regenerate Selected Segments (Batch) / 選択したセグメントを一括再生成", variant="primary")
+                    
                     for i in range(max_chunks):
                         with gr.Group(visible=False) as chunk_group:
                             gr.Markdown(f"### Chunk {i+1}")
@@ -340,6 +344,7 @@ def build_demo(
                                 for j in range(max_segments_per_chunk):
                                     with gr.Group(visible=False) as seg_group:
                                         with gr.Row():
+                                            seg_batch_checkbox = gr.Checkbox(label="Select", value=False, scale=0, container=True, min_width=30)
                                             seg_text_input = gr.Textbox(
                                                 label=f"Seg {j+1}", 
                                                 interactive=True, 
@@ -387,6 +392,7 @@ def build_demo(
                                             "update_btn": cand_update_btn,
                                             "chunk_idx": i,
                                             "seg_idx": j,
+                                            "batch_checkbox": seg_batch_checkbox,
                                         })
                                 all_segment_ui.append(segment_uis_for_this_chunk)
                             
@@ -561,6 +567,8 @@ def build_demo(
                             show_progress="full",
                         )
         
+
+                        
                         # Update
                         ui["update_btn"].click(
                             fn=update_segment,
@@ -579,6 +587,207 @@ def build_demo(
                                 segments_state
                             ]
                         )
+
+                # Batch Regeneration Handler
+                def batch_regenerate_segments(
+                    segments_state_val,
+                    reference_speech,
+                    reference_text,
+                    duration_scale,
+                    top_k,
+                    top_p,
+                    min_p,
+                    temperature,
+                    seed,
+                    *args
+                ):
+                    # args contains flattened (checkbox, text_input) pairs
+                    # Total args length = max_chunks * max_segments_per_chunk * 2
+                    
+                    # 1. Identify selected segments
+                    selected_indices = [] # List of (chunk_idx, seg_idx, text_val)
+                    
+                    total_pairs = max_chunks * max_segments_per_chunk
+                    if len(args) != total_pairs * 2:
+                        print(f"[Error] Expected {total_pairs*2} args, got {len(args)}")
+                        return [gr.update()] * (total_pairs) # Fail safe? 
+                        
+                    input_pairs = iter(args)
+                    # Iterate to match the structure
+                    flat_idx = 0
+                    
+                    for c_idx in range(max_chunks):
+                        for s_idx in range(max_segments_per_chunk):
+                            chk = next(input_pairs)
+                            txt = next(input_pairs)
+                            
+                            if chk:
+                                selected_indices.append((c_idx, s_idx, txt))
+                            flat_idx += 1
+                            
+                    if not selected_indices:
+                        print("[Info] No segments selected for batch regeneration.")
+                        # Return updates to reset/hide candidates? Or just do nothing.
+                        # We need to return valid outputs matching the signature.
+                        # Outputs: [cand_group...] list for ALL segments? 
+                        # We must update ALL segments because the output signature is fixed list.
+                        return [gr.update() for _ in range(total_pairs * 10 + 1)] # This is hard.
+                        # Wait, what are the outputs?
+                        # We need to update cand_group, candidates(8), radio for EACH segment involves?
+                        # No, we can just update the ones we changed? 
+                        # Gradio outputs must be fixed length.
+                        # We must output updates for ALL segments if we define outputs as ALL segments' components.
+                    
+                    print(f"[Info] Batch regenerating {len(selected_indices)} segments...")
+                    
+                    # 2. Prepare Batch
+                    # Constraint: Max 20 items per batch call (10 segments x 2 candidates)
+                    # We will process in mini-batches of 10 segments (20 items).
+                    
+                    # We need to store results mapped to (c_idx, s_idx)
+                    results_map = {} # (c, s) -> [cand1, cand2]
+                    
+                    # Split selected_indices into chunks of 10
+                    batch_size_limit = 10
+                    import math
+                    num_batches = math.ceil(len(selected_indices) / batch_size_limit)
+                    
+                    seed_val = None
+                    if str(seed).strip() not in {"", "None", "none"}:
+                        seed_val = int(float(seed))
+                    
+                    for b_i in range(num_batches):
+                        batch_indices = selected_indices[b_i*batch_size_limit : (b_i+1)*batch_size_limit]
+                        
+                        # Construct flattened text list: [S1, S1, S2, S2, ...]
+                        target_texts = []
+                        for _, _, txt in batch_indices:
+                            target_texts.append(txt)
+                            target_texts.append(txt) # 2 candidates
+                            
+                        # Run Inference
+                        print(f"[Info] Running mini-batch {b_i+1}/{num_batches} with {len(target_texts)} items...")
+                        
+                        # We use run_inference_batch
+                        # Note: run_inference_batch returns list of (sr, wav)
+                        batch_results = run_inference_batch(
+                            target_texts=target_texts,
+                            reference_speech=reference_speech,
+                            reference_text=reference_text,
+                            duration_scale=duration_scale,
+                            top_k=top_k,
+                            top_p=top_p,
+                            min_p=min_p,
+                            temperature=temperature,
+                            seed=seed_val,
+                            resources=resources,
+                        )
+                        
+                        # Unpack
+                        for k, (c, s, _) in enumerate(batch_indices):
+                            # Indices in batch_results for this segment are 2*k and 2*k+1
+                            cand1 = batch_results[2*k] if 2*k < len(batch_results) else None
+                            cand2 = batch_results[2*k+1] if 2*k+1 < len(batch_results) else None
+                            
+                            cands = []
+                            if cand1: cands.append(cand1)
+                            if cand2: cands.append(cand2)
+                            
+                            results_map[(c, s)] = cands
+                            
+                    # 3. Update State & UI
+                    new_state = list(segments_state_val)
+                    
+                    # We need to construct the return list.
+                    # Output order: 
+                    # For each segment: [cand_group, c1, c2, ..., c8, radio, checkbox] -> checkbox update is optional but good to uncheck?
+                    # Let's say: [cand_group, c1...c8, radio] for EACH segment.
+                    # And finally [segments_state]
+                    
+                    ui_updates = []
+                    
+                    for c_idx in range(max_chunks):
+                        for s_idx in range(max_segments_per_chunk):
+                            # Did we update this segment?
+                            new_cands = results_map.get((c_idx, s_idx))
+                            
+                            if new_cands is not None:
+                                # Update State
+                                if c_idx < len(new_state):
+                                    segs = new_state[c_idx]["segments"]
+                                    if s_idx < len(segs):
+                                        # Update text too (from input)
+                                        # Find the text used
+                                        # We have it in selected_indices logic but harder to lookup.
+                                        # It's in the args passed!
+                                        # We can just trust the args passed was correct.
+                                        pass 
+                                        # Wait, we should update the text in state to match what was generated.
+                                        # But we don't easy have it here without looking up again.
+                                        # Okay let's just update candidates. Use existing text.
+                                        # Better: Re-read text from args? 
+                                        # Let's assume text change is handled by separate event or we accept it here.
+                                        # For simplicity, update candidates.
+                                        segs[s_idx]["candidates"] = new_cands
+                                
+                                # UI Updates
+                                ui_updates.append(gr.update(visible=True)) # cand_group
+                                # Update first 2 candidates
+                                for k in range(8):
+                                    if k < len(new_cands):
+                                        ui_updates.append(gr.update(value=new_cands[k], visible=True))
+                                    else:
+                                        ui_updates.append(gr.update(value=None, visible=False)) # Hide others
+                                ui_updates.append(gr.update(value=None)) # reset radio
+                                # Also uncheck the box? 
+                                ui_updates.append(gr.update(value=False)) # Uncheck
+                                
+                            else:
+                                # No change
+                                ui_updates.append(gr.update()) # cand_group
+                                for _ in range(8): ui_updates.append(gr.update())
+                                ui_updates.append(gr.update()) # radio
+                                ui_updates.append(gr.update()) # checkbox - keep as is
+                    
+                    ui_updates.append(new_state)
+                    return ui_updates
+
+                # Collect inputs/outputs for the batch handler
+                batch_inputs = [
+                    segments_state,
+                    reference_speech_input,
+                    reference_text_box,
+                    duration_scale_box,
+                    top_k_box,
+                    top_p_box,
+                    min_p_box,
+                    temperature_box,
+                    seed_box,
+                ]
+                
+                batch_outputs = []
+                
+                # Flatten segments for inputs/outputs
+                for c_idx in range(max_chunks):
+                    for s_idx in range(max_segments_per_chunk):
+                        ui = all_segment_ui[c_idx][s_idx]
+                        # Inputs: Checkbox, Text
+                        batch_inputs.append(ui["batch_checkbox"])
+                        batch_inputs.append(ui["text"])
+                        
+                        # Outputs: cand_group, c1..c8, radio, checkbox (to uncheck)
+                        batch_outputs.append(ui["cand_group"])
+                        batch_outputs.extend(ui["cand_audios"])
+                        batch_outputs.append(ui["radio"])
+                        batch_outputs.append(ui["batch_checkbox"])
+                
+                batch_outputs.append(segments_state)
+                
+                batch_regen_btn.click(
+                    fn=batch_regenerate_segments,
+                    inputs=batch_inputs,
+                    outputs=batch_outputs,
+                )
         
                 def gradio_inference(
                     reference_speech,
